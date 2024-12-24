@@ -1,0 +1,1478 @@
+<html>
+    <head>
+        <title>Marching Cubes Optimized Metaballs - WebGL</title>
+        <style>
+            body {
+                background-color: black;
+                margin: 0;
+                padding: 0;
+                position: relative;
+            }
+            #main {
+                display: flex;
+                height: 100%;
+                justify-content: center;
+                align-items: center;
+            }
+            canvas {
+                height: 100%;
+            }
+        </style>
+    </head>
+    <body>
+        <section id="main">
+            <canvas id="canvas" height="1024" width="1024"></canvas>
+        </section>
+    </body>
+    <script src="lib/dat.gui.js"></script>
+    <script src="lib/gl-matrix.js"></script>
+    <script>
+
+    // http://paulbourke.net/geometry/polygonise/
+    // The tri table has 256 * 16 possible arrangements making 4096 things to pick from,
+    // where 4096 in hex is 0x1000 which is why this goes from 0x0 -> 0xfff. As a result
+    // it lets us pick which tris are made with edges from this table.
+    const EDGE_TABLE = [
+        0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+        0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+        0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+        0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+        0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+        0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+        0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
+        0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+        0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
+        0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+        0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
+        0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+        0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
+        0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+        0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
+        0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+        0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+        0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+        0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+        0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+        0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+        0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+        0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+        0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
+        0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+        0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
+        0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+        0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
+        0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+        0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
+        0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+        0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0 
+    ];
+
+    // http://paulbourke.net/geometry/polygonise/
+    const TRI_TABLE = [
+        [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1],
+        [3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1],
+        [3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1],
+        [3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1],
+        [9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1],
+        [9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1],
+        [2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1],
+        [8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1],
+        [9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1],
+        [4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1],
+        [3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1],
+        [1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1],
+        [4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1],
+        [4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1],
+        [5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1],
+        [2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1],
+        [9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1],
+        [0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1],
+        [2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1],
+        [10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1],
+        [4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1],
+        [5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1],
+        [5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1],
+        [9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1],
+        [0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1],
+        [1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1],
+        [10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1],
+        [8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1],
+        [2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1],
+        [7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1],
+        [2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1],
+        [11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1],
+        [5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1],
+        [11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1],
+        [11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1],
+        [1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1],
+        [9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1],
+        [5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1],
+        [2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1],
+        [5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1],
+        [6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1],
+        [3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1],
+        [6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1],
+        [5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1],
+        [1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1],
+        [10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1],
+        [6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1],
+        [8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1],
+        [7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1],
+        [3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1],
+        [5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1],
+        [0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1],
+        [9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1],
+        [8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1],
+        [5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1],
+        [0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1],
+        [6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1],
+        [10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1],
+        [10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1],
+        [8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1],
+        [1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1],
+        [0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1],
+        [10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1],
+        [3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1],
+        [6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1],
+        [9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1],
+        [8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1],
+        [3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1],
+        [6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1],
+        [0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1],
+        [10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1],
+        [10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1],
+        [2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1],
+        [7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1],
+        [7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1],
+        [2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1],
+        [1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1],
+        [11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1],
+        [8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1],
+        [0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1],
+        [7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1],
+        [10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1],
+        [2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1],
+        [6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1],
+        [7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1],
+        [2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1],
+        [1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1],
+        [10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1],
+        [10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1],
+        [0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1],
+        [7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1],
+        [6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1],
+        [8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1],
+        [6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1],
+        [4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1],
+        [10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1],
+        [8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1],
+        [0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1],
+        [1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1],
+        [8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1],
+        [10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1],
+        [4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1],
+        [10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1],
+        [5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1],
+        [11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1],
+        [9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1],
+        [6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1],
+        [7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1],
+        [3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1],
+        [7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1],
+        [3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1],
+        [6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1],
+        [9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1],
+        [1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1],
+        [4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1],
+        [7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1],
+        [6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1],
+        [3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1],
+        [0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1],
+        [6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1],
+        [0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1],
+        [11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1],
+        [6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1],
+        [5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1],
+        [9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1],
+        [1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1],
+        [1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1],
+        [10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1],
+        [0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1],
+        [5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1],
+        [10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1],
+        [11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1],
+        [9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1],
+        [7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1],
+        [2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1],
+        [8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1],
+        [9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1],
+        [9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1],
+        [1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1],
+        [9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1],
+        [9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1],
+        [5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1],
+        [0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1],
+        [10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1],
+        [2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1],
+        [0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1],
+        [0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1],
+        [9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1],
+        [5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1],
+        [3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1],
+        [5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1],
+        [8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1],
+        [9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1],
+        [1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1],
+        [3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1],
+        [4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1],
+        [9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1],
+        [11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1],
+        [11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1],
+        [2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1],
+        [9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1],
+        [3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1],
+        [1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1],
+        [4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1],
+        [4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1],
+        [3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1],
+        [0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1],
+        [9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1],
+        [1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+    ];
+
+    // Using the mask against the value from EDGE_TABLE[edgeTableIndex], we determine whether
+    // we should add the vertex we interpolate between corners[startIdx] and
+    // corners[endIdx].
+    const EDGE_TABLE_TO_VERT_LIST = [
+        // back bottom
+        { mask: 1, startIdx: 0, endIdx: 1 }, 
+        // right bottom
+        { mask: 2, startIdx: 1, endIdx: 2 }, 
+        // front bottom
+        { mask: 4, startIdx: 2, endIdx: 3 }, 
+        // left bottom
+        { mask: 8, startIdx: 3, endIdx: 0 }, 
+        // back top
+        { mask: 16, startIdx: 4, endIdx: 5 }, 
+        // right top
+        { mask: 32, startIdx: 5, endIdx: 6 }, 
+        // front top
+        { mask: 64, startIdx: 6, endIdx: 7 }, 
+        // left top
+        { mask: 128, startIdx: 7, endIdx: 4 }, 
+        // back left
+        { mask: 256, startIdx: 0, endIdx: 4 }, 
+        // back right
+        { mask: 512, startIdx: 1, endIdx: 5 }, 
+        // front right
+        { mask: 1024, startIdx: 2, endIdx: 6 }, 
+        // front left
+        { mask: 2048, startIdx: 3, endIdx: 7 }, 
+    ];
+
+    const { glMatrix } = window;
+
+    const SHADER_NAME = 'shader';
+
+    class SDF {
+        constructor() {
+            // How fast to translate.
+            this.velocity = 0.01;
+
+            // The k parameter to opSmoothUnion
+            this.unionK = 0.45;
+
+            this.spheres = [
+                {
+                    r: 0.29,
+                    c: [0, 0, 0],
+                    direction: [-0.25, -0.2, -0.25],
+                },
+                {
+                    r: 0.3,
+                    c: [0, 0, 0],
+                    direction: [-0.12, -0.15, -0.15],
+                },
+                {
+                    r: 0.25,
+                    c: [0, 0, 0],
+                    direction: [0.1, 0.11, -0.1],
+                },
+                {
+                    r: 0.2,
+                    c: [0, 0, 0],
+                    direction: [0.15, -0.15, 0.1],
+                },
+                {
+                    r: 0.15,
+                    c: [0, 0, 0],
+                    direction: [-0.15, 0.09, 0.15],
+                },
+                {
+                    r: 0.15,
+                    c: [0, 0, 0],
+                    direction: [-0.25, -0.1, 0],
+                },
+                {
+                    r: 0.2,
+                    c: [0, 0, 0],
+                    direction: [0, -0.1, -0.1],
+                },
+                {
+                    r: 0.37,
+                    c: [0, 0, 0],
+                    direction: [-0.25, -0.25, 0.25],
+                },
+                {
+                    r: 0.29,
+                    c: [0, 0, 0],
+                    direction: [0.15, -0.15, -0.15],
+                },
+                {
+                    r: 0.19,
+                    c: [0, 0, 0],
+                    direction: [-0.02, -0.2, -0.15],
+                },
+                {
+                    r: 0.30,
+                    c: [0, 0, 0],
+                    direction: [0.25, -0.1, 0],
+                },
+            ];
+
+            this.updateSdf();
+        }
+
+        updateSdf() {
+            this.currentSdf = (p) => {
+                let d = null;
+                this.spheres.forEach(({ r, c }) => {
+                    if (d === null) {
+                        d = this.sdfSphere(p, r, c);
+                    } else {
+                        const next = this.sdfSphere(p, r, c);
+                        // Higher k value = more joining between sphers further away.
+                        d = this.opSmoothUnion(d, next, this.unionK);
+                    }
+                });
+                return d;
+            };
+        }
+
+        update(size) {
+            // Constrain the size to keep things closer together.
+            const s = size / 1;
+
+            const left = -s / 2
+            const right = s / 2;
+            const back = -s / 2;
+            const front = s / 2;
+            const bottom = -s / 2;
+            const top = s / 2;
+
+            this.spheres.forEach(s => {
+                const testLeft = s.r >= Math.sqrt((s.c[0] - left) ** 2);
+                const testRight = s.r >= Math.sqrt((s.c[0] - right) ** 2);
+                const testBottom =  s.r >= Math.sqrt((s.c[1] - bottom) ** 2);
+                const testTop = s.r >= Math.sqrt((s.c[1] - top) ** 2);
+                const testBack = s.r >= Math.sqrt((s.c[2] - back) ** 2);
+                const testFront = s.r >= Math.sqrt((s.c[2] - front) ** 2);
+                if (testLeft || testRight) {
+                    s.direction[0] = -s.direction[0];
+                }
+                if (testBottom || testTop) {
+                    s.direction[1] = -s.direction[1];
+                }
+                if (testBack || testFront) {
+                    s.direction[2] = -s.direction[2];
+                }
+                s.c[0] += s.direction[0] * this.velocity;
+                s.c[1] += s.direction[1] * this.velocity;
+                s.c[2] += s.direction[2] * this.velocity;
+            });
+            this.updateSdf();
+        }
+
+        opSmoothUnion(d1, d2, k = 0.1) {
+            // float opSmoothUnion( float d1, float d2, float k ) {
+            // float h = clamp( 0.5 + 0.5*(d2-d1)/k, 0.0, 1.0 );
+            // return mix( d2, d1, h ) - k*h*(1.0-h); }
+            // Mix:
+            // https://www.khronos.org/registry/OpenGL-Refpages/gl4/html/mix.xhtml
+            // x Specify the start of the range in which to interpolate.
+            // y Specify the end of the range in which to interpolate.
+            // a Specify the value to use to interpolate between x and y.
+            // "x * (1 - a) + y * a"
+            const v = 0.5 + 0.5 * (d2 - d1) / k;
+            const h = Math.max(0, Math.min(v, 1));
+
+            const mixed = d2 * (1 - h) + d1 * h;
+            return mixed - k * h * (1 - h);
+        }
+
+        opSmoothSubtraction(d1, d2, k = 0.1) {
+            // float opSmoothSubtraction( float d1, float d2, float k ) {
+            // float h = clamp( 0.5 - 0.5*(d2+d1)/k, 0.0, 1.0 );
+            // return mix( d2, -d1, h ) + k*h*(1.0-h); }
+            const v = 0.5 - 0.5 * (d2 + d1) / k;
+            const h = Math.max(0, Math.min(v, 1));
+
+            const mixed = d2 * (1 - h) + -d1 * h;
+            return mixed + k * h * (1 - h);
+        }
+
+        opSmoothIntersection(d1, d2, k = 0.1) {
+            // float opSmoothIntersection( float d1, float d2, float k ) {
+            // float h = clamp( 0.5 - 0.5*(d2-d1)/k, 0.0, 1.0 );
+            // return mix( d2, d1, h ) + k*h*(1.0-h); }
+            const v = 0.5 - 0.5 * (d2 - d1) / k;
+            const h = Math.max(0, Math.min(v, 1));
+
+            const mixed = d2 * (1 - h) + d1 * h;
+            return mixed + k * h * (1 - h);
+        }
+
+        sdfSphere(p, radius, c) {
+            const magnitude = Math.sqrt(
+                (p[0] - c[0]) ** 2 +
+                (p[1] - c[1]) ** 2 +
+                (p[2] - c[2]) ** 2
+            );
+            return magnitude - radius;
+        }
+    }
+
+    class Shader {
+        constructor(gl, vertCode, fragCode) {
+            this.program = null;
+            this.setupShader(gl, vertCode, fragCode);
+        }
+
+        setupShader(gl, vertCode, fragCode) {
+            const log = (shader) => {
+                const compiled = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+                if (!compiled) {
+                    console.log('Shader compiled failed: ' + compiled);
+                
+                    const compilationLog = gl.getShaderInfoLog(shader);
+                    console.log('Shader compiler log: ' + compilationLog);
+                }
+            };
+
+            const vertShader = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vertShader, vertCode);
+            gl.compileShader(vertShader);
+            log(vertShader);
+            
+        
+            const fragShader = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fragShader, fragCode); 
+            gl.compileShader(fragShader);
+            log(fragShader);
+            
+            const shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vertShader);
+            gl.attachShader(shaderProgram, fragShader);
+            gl.linkProgram(shaderProgram);
+
+            this.program = shaderProgram
+        }
+
+        cacheUniformLocations(gl, uniformNames) {
+            uniformNames.forEach(name => {
+                const key = `${name}Location`;
+                this[key] = gl.getUniformLocation(this.program, name);
+            });
+        }
+
+        cacheAttributeLocations(gl, attributeNames) {
+            attributeNames.forEach(name => {
+                const key = `${name}Location`;
+                const location = gl.getAttribLocation(this.program, name);
+                this[key] = location;
+            });
+        }
+    }
+
+    class MarchingCubes {
+        constructor(sdf, viz) {
+            this.sdf = sdf;
+            this.viz = viz;
+            this.size = 2;
+            this.cubeSize = 0.08;
+            this.toggleInterpolate = true;
+            this.toggleMarchingCubesDebug = false;
+            this.toggleBoxDebug = true;
+
+            this.directions = [
+                'FORWARD',
+                'BACKWARD',
+                'UP',
+                'DOWN',
+                'LEFT',
+                'RIGHT',
+            ];
+
+            // All three of these should have the same length.
+            // vertexIndexToCorner:
+            //  This has a number and maps it to one vertex. That vertex is a cube corner. These
+            //  are shared by multiple cubes.
+            this.vertexIndexToCorner = [];
+            // vertexIndexToCornersGraph:
+            //  This also uses the same number, but it's a graph of what other vertices
+            //  are associated with this corner. For example, we can find the vertex
+            //  before it, above it, to the left or right of it, or up and down from it
+            //  it's basically like a graph with a node. Also belongs to a cube, basically.
+            this.vertexIndexToCornersGraph = [];
+            // vertexIndexToSdfValue
+            //  Evaluate the SDF at the corner and cache it while we're iterating over them.
+            //  This lets us reuse an sdf for a corner vertex shared by multiple cubes.
+            this.vertexIndexToSdfValue = [];
+
+            // These must persist across invocations of toTriangles();
+            // vertexIndexToTriangleVertex:
+            //  Now this is for actual interpolated vertices that we'll render. It's a number
+            //  that maps to a vertex for a triangle.
+            //  Every value we put into vertList[i] will actually be the index of the vertex in
+            //  this array. This also is a deduplication measure since we already use similar
+            //  values for edges.
+            this.vertexIndexToTriangleVertex = [];
+            // vertexIndexToVertexNormal:
+            //  Holds each normal that corresponds to each vertexIndexToTriangleVertex. Basically
+            //  the indices should match, and so should the lengths of these two, since it's just
+            //  the normals counterpart to the positions (i.e. triangle vertices).
+            this.vertexIndexToVertexNormal = [];
+            // edgeToVertexIndex:
+            //  As we invoke toTriangles, we want to cache vertices we've computed using linear
+            //  interpolation. This caches vertices by which edge they belong to, using a combined
+            //  key of the start and endpoints, and it maps it to the same index we'd find in
+            //  vertexIndexToTriangleIndex.
+            this.edgeToVertexIndex = {}
+            // triangles:
+            //  All the triangles made up of indices that map from here into vertexIndexToTriangleVertex.
+            //  Indices must point to a whole vertex (i.e. the highest index should not be bigger than
+            //  vertexIndexToTriangleVertex.length / 3).
+            this.triangles = [];
+
+            // vertList:
+            //  Used internally for generateTriangles. Instantiating it once here, becuase we can
+            //  reuse its memory across calls to generateTriangles
+            this.vertList = new Array(12);
+
+            const stateDefaults = {
+                buffer: null,
+                data: null,
+                callback: null,
+                enabled: true,
+                hasIndices: false,
+                hasNormals: false,
+                useFalloff: false,
+            };
+
+            this.state = {
+                grid: {
+                    ...stateDefaults,
+                    colour: new Float32Array([1.0, 1.0, 1.0]),
+                    opacity: 0.2,
+                },
+                boundingBox: {
+                    ...stateDefaults,
+                    colour: new Float32Array([1.0, 1.0, 1.0]),
+                    opacity: 1,
+                },
+                indexedMesh: {
+                    ...stateDefaults,
+                    colour: new Float32Array([0.75, 0, 0]),
+                    opacity: 1,
+                    vertices: {},
+                    normals: {},
+                    indices: {},
+                    hasIndices: true,
+                    hasNormals: true,
+                    useFalloff: true,
+                },
+            };
+        }
+
+        updateGrid() {
+            if (!this.state.grid.enabled) {
+                return;
+            }
+            const start = -this.size * 0.5;
+            const end = this.size * 0.5;
+            const { cubeSize: s } = this;
+
+            // Draw a 3d grid, rather than trying to wireframe the cubes.
+            const lines = [];
+            // lines left to right
+            for (let y = start; y <= end; y += s) {
+                for (let z = start; z <= end; z += s) {
+                    lines.push(start, y, z);
+                    lines.push(end, y, z);
+                }
+            }
+
+            // lines bottom to top
+            for (let x = start; x <= end; x += s) {
+                for (let z = start; z <= end; z += s) {
+                    lines.push(x, start, z);
+                    lines.push(x, end, z);
+                }
+            }
+            // lines back to front.
+            for (let x = start; x <= end; x += s) {
+                for (let y = start; y <= end; y += s) {
+                    lines.push(x, y, start);
+                    lines.push(x, y, end);
+                }
+            }
+
+            this.state.grid.data = new Float32Array(lines);
+            this.state.grid.callback = (gl) => gl.drawArrays(gl.LINES, 0, lines.length / 3);
+            viz.setupBuffer(this.state.grid);
+        }
+
+
+        getNeighbourGraph(vertexIndex, direction, x, y, z) {
+            // Given a direction, we can get the index of the vertex there.
+            const { size, cubeSize } = this;
+            const start = -size * 0.5;
+            const end = size * 0.5;
+            
+            const nextRow = (size + cubeSize) / cubeSize;
+            const nextPlane = nextRow ** 2;
+            
+            let nextIndex;
+
+            switch (direction) {
+                // These are neighbouring in the array because the innermost loop is +/-z
+                case 'FORWARD':
+                    nextIndex = vertexIndex + 1; break;
+                case 'BACKWARD':
+                    nextIndex = vertexIndex - 1; break;
+                // These are one row off, since the next innermost loop is +/-y
+                // We work bottom to top, so the next values come in first making the more positive
+                // values on the next row.
+                case 'UP':
+                    nextIndex = vertexIndex + nextRow; break;
+                case 'DOWN': 
+                    nextIndex = vertexIndex - nextRow; break;
+                // These are one plane off, since the outermost loop is +/x, which means
+                // we make an entire plane (along yz) before we even increment to the next x.
+                case 'LEFT':
+                    nextIndex = vertexIndex - nextPlane; break;
+                case 'RIGHT':
+                    nextIndex = vertexIndex + nextPlane; break;
+            }
+
+            // Out of bounds in these cases             
+            const isBackColumn = z === start && direction === 'BACKWARD';
+            const isFrontColumn = z === end && direction === 'FORWARD';
+
+            const isTopRow = y === end && direction === 'UP';
+            const isBottomRow = y === start && direction === 'DOWN';
+
+            const isleftPlane = x === start && direction === 'LEFT';
+            const isRightPlane = x === end && direction === 'RIGHT';
+
+            // We'd collide if we try to use an index outside of htese bounds.
+            if (isBackColumn ||
+                isFrontColumn ||
+                isTopRow ||
+                isBottomRow ||
+                isleftPlane ||
+                isRightPlane
+            ) {
+                nextIndex = null;
+            }
+            return nextIndex;
+        }
+
+        indexCorners() {
+            // see if we can get all the points and index them so that we then know which edge uses them
+            // and so on.
+            // i.e. we never refer to vertices from the cube, instead we store them all by an index so that
+            // we can reuse, and then we can index the output verts from marching because if vert10 <-> vert11
+            // produced an intersection, it doesn't matter if it's the edge shared by the current (or next,
+            // or previous box, depending on which edge is shared), because it's still the same two points
+            // being tested.
+            const { size, cubeSize: s } = this;
+            const start = -size * 0.5;
+            const end = size * 0.5;
+
+            let totalIndex = 0;
+            for (let x = start; x <= end; x += s) {
+                for (let y = start; y <= end; y += s) {
+                    for (let z = start; z <= end; z += s) {
+                        // lets us resolve a vertex using its index to the underlying x, y, z values.
+                        const vertex = [x, y, z];
+                        this.vertexIndexToCorner.push(vertex);
+
+                        // directional graph
+                        const graph = {};
+                        this.directions.forEach(direction => {
+                            graph[direction] = this.getNeighbourGraph(totalIndex, direction, x, y, z);
+                        })
+                        this.vertexIndexToCornersGraph.push(graph);
+
+                        // stores the sdf value per-vertex index as well for reuse later on.
+                        const sdfValue = this.sdf.currentSdf(vertex);
+                        this.vertexIndexToSdfValue.push(sdfValue);
+
+                        totalIndex++;
+                    }
+                }
+            }
+
+            if (this.vertexIndexToCorner.length !== this.vertexIndexToCornersGraph.length){
+                throw new Error("inconsistent lengths", this.vertexIndexToCorner.length, this.vertexIndexToCornersGraph.length);
+            }
+        }
+
+        // Midpoint interpolation.
+        getVertMidpoint(p1, p2) {
+            const p = new Array(3);
+            p[0] = (p1[0] + p2[0]) * 0.5;
+            p[1] = (p1[1] + p2[1]) * 0.5;
+            p[2] = (p1[2] + p2[2]) * 0.5;
+            return p;
+        }
+        
+        // http://paulbourke.net/geometry/polygonise/
+        getVertInterpolated(p1, p2, valp1, valp2) {
+            // Some random value we pick afaict. But since we use an isolevel
+            // of 0 to determine inside or outside (i.e. any value < 0 is inside)
+            // we should be able to just set this to 0 and leave it at that.
+            const isolevel = 0.0;
+            // const epsilon = 0.00001;
+            const epsilon = 0;
+            const p = new Array(3);
+
+            if (Math.abs(isolevel - valp1) < epsilon) {
+                return p1;
+            }
+            if (Math.abs(isolevel - valp2) < epsilon) {
+                return p2;
+            }
+            if (Math.abs(valp1 - valp2) < epsilon) {
+                return p1;
+            }
+
+            const mu = (isolevel - valp1) / (valp2 - valp1);
+            p[0] = p1[0] + mu * (p2[0] - p1[0]);
+            p[1] = p1[1] + mu * (p2[1] - p1[1]);
+            p[2] = p1[2] + mu * (p2[2] - p1[2]);
+
+            return p;
+        }
+
+        generatePerTriangleNormal(v1, v2, v3) {
+            // v1, v2, v3 are just indices, so we need to resolve them to actual vertices
+            const v1x = this.vertexIndexToTriangleVertex[v1 * 3];
+            const v1y = this.vertexIndexToTriangleVertex[v1 * 3 + 1];
+            const v1z = this.vertexIndexToTriangleVertex[v1 * 3 + 2];
+
+            const v2x = this.vertexIndexToTriangleVertex[v2 * 3];
+            const v2y = this.vertexIndexToTriangleVertex[v2 * 3 + 1];
+            const v2z = this.vertexIndexToTriangleVertex[v2 * 3 + 2];
+
+            const v3x = this.vertexIndexToTriangleVertex[v3 * 3];
+            const v3y = this.vertexIndexToTriangleVertex[v3 * 3 + 1];
+            const v3z = this.vertexIndexToTriangleVertex[v3 * 3 + 2];
+
+            // compute normal with cross product between the vectors made by the vertices
+            const ax = v2x - v1x;
+            const ay = v2y - v1y;
+            const az = v2z - v1z;
+
+            const bx = v3x - v1x;
+            const by = v3y - v1y;
+            const bz = v3z - v1z;
+
+            // We get lucky in that winding in this direction seems to guarantee, always,
+            // an outward orientation for the normal.
+            const nx = ay * bz - az * by;
+            const ny = -(ax * bz - az * bx);
+            const nz = ax * by - ay * bx;
+            return [nx, ny, nz];
+        }
+
+        generatePerVertexNormal(vertex) {
+            const v = vertex;
+            const { currentSdf } = this.sdf;
+            /*
+                * Basically gives us the per-vertex normal. If we don't use this approach, we'll have to
+                * later on:
+                * 1. for each vertex
+                * 2. figure out which triangles touch it.
+                * 3. take the normal of each triangle
+                * 4. add them all together to average each triangles contribution
+                * 5. make that normal the per-vertex normal
+                * Based on how we generate the mesh, finding the triangles that a vertex shares is
+                * cumbersome, but it might be worthwhile doing later on to cut down on geometry and use
+                * indexing + drawElements.
+                * See the comments at the very top for more info and links on per-vertex normals.
+                */
+
+            // https://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
+            // vec3 calcNormal( in vec3 p ) // for function f(p)
+            // {
+            //     const float eps = 0.0001; // or some other value
+            //     const vec2 h = vec2(eps,0);
+            //     return normalize( vec3(f(p+h.xyy) - f(p-h.xyy),
+            //                         f(p+h.yxy) - f(p-h.yxy),
+            //                         f(p+h.yyx) - f(p-h.yyx) ) );
+            // }
+            const eps = 0.00001;
+            const x = currentSdf([v[0] + eps, v[1], v[2]]) - currentSdf([v[0] - eps, v[1], v[2]]);
+            const y = currentSdf([v[0], v[1] + eps, v[2]]) - currentSdf([v[0], v[1] - eps, v[2]]);
+            const z = currentSdf([v[0], v[1], v[2] + eps]) - currentSdf([v[0], v[1], v[2] - eps]);
+            return [x, y, z];
+        }
+
+        generateTriangles(corners, edgeTableIndex) {
+            const { vertexIndexToSdfValue, vertexIndexToCorner } = this;
+            const getVert = this.toggleInterpolate ? this.getVertInterpolated : this.getVertMidpoint;
+            
+            if (EDGE_TABLE[edgeTableIndex] == 0) {
+                // Cube is entirely in/out of the surface
+                return;
+            }
+
+            // The amount of actual verts we make, they should be deduplicate.
+            EDGE_TABLE_TO_VERT_LIST.forEach(({ mask, startIdx, endIdx }, i) => {
+                if (EDGE_TABLE[edgeTableIndex] & mask) {
+                    const idx1 = corners[startIdx]
+                    const idx2 = corners[endIdx];
+                    const corner1 = vertexIndexToCorner[idx1];
+                    const corner2 = vertexIndexToCorner[idx2];
+                    const sdf1 = vertexIndexToSdfValue[idx1];
+                    const sdf2 = vertexIndexToSdfValue[idx2];
+                    if (!corner1 || !corner2 || !sdf1 || !sdf2) {
+                        // TODO
+                        // Sometimes we get out of bounds accesses here on some of the corners.
+                        // Not quite sure why. Need to debug that. For now return early to avoid
+                        // math on undefined / NaN.
+                        return;
+                    }
+
+                    // Find the vertices where the surface intersects the cube
+                    // This must be between the corners[startIdx] and corners[endIdx] (i.e. it's
+                    // some percentage along this line).
+                    // Another thing that must be true is that if the sdfValues[startIdx] is > 0
+                    // then sdfValues[endIdx] is < 0 or vice versa to show we're crossing the surface.
+                    const key = `${idx1}-${idx2}`;
+
+                    let index;
+                    if (this.edgeToVertexIndex[key]) {
+                        // Vert already exists, so we can just use the index directly, thereby reusing
+                        // the vert. This allows us to index later.
+                        index = this.edgeToVertexIndex[key];
+                    } else {
+                        // New vert added.
+                        // index = this.vertexIndexToTriangleVertex.length;
+                        // If we're expanding everything here, then we / 3 to get the index -> vertex
+                        // since the vertex has 3 components.
+                        index = this.vertexIndexToTriangleVertex.length / 3;
+                        const triangleVert = getVert(corner1, corner2, sdf1, sdf2);
+                        this.edgeToVertexIndex[key] = index;
+                        // this.vertexIndexToTriangleVertex.push(triangleVert);
+                        // Push expanded, so we can use it directly for a buffer.
+                        this.vertexIndexToTriangleVertex.push(...triangleVert);
+
+                        // If it's per-vertex normals, we can compute it here. Otherwise if it's using
+                        // the triangle's surface normal, and sharing that with all three vertices, we
+                        // need to compute that when we have all three vertices making up the triangle face.
+                        const normal = this.generatePerVertexNormal(triangleVert);
+                        this.vertexIndexToVertexNormal.push(...normal);
+                    }
+
+                    // We use the index to a vertex index for finding the -real- vertices.
+                    this.vertList[i] = index;
+                }
+            });
+
+            // Look up triangles in the TRI_TABLE until we encounter a -1 for the current index.
+            // If we hit -1 it means that no further vertices are defined for the tri.
+            for (let i = 0; TRI_TABLE[edgeTableIndex][i] != -1; i += 3) {
+                // Push expanded, so we can use it directly for a buffer.
+                const v1 = this.vertList[TRI_TABLE[edgeTableIndex][i]];
+                const v2 = this.vertList[TRI_TABLE[edgeTableIndex][i + 1]];
+                const v3 = this.vertList[TRI_TABLE[edgeTableIndex][i + 2]];
+                // Use the three vertices at the indices v1, v2, v3 to draw this triangle.
+                // v1, v2, v3 point to the start of the vert's x coordinate, so to get back to
+                // the table we'd need to do:
+                // verts[v1 * 3 + 0] = x
+                // verts[v1 * 3 + 1] = y
+                // verts[v1 * 3 + 2] = z
+                // and so on.
+                this.triangles.push(v1, v2, v3);
+            }
+        }
+
+        generateTrianglesFromCorners() {
+            //  Assume that each vertex is the bottom-top-left corner of the cube.
+            // Order we want to go is:
+            //  bottom back left
+            //  bottom back right
+            //  bottom front right
+            //  bottom front left
+            //  top back left
+            //  top back right
+            //  top front right
+            //  top front left
+            // Given the SDR values we computed for the corner, we build a mask in to the edge table
+            // index for this  cube.
+
+            const { vertexIndexToCorner, vertexIndexToCornersGraph, vertexIndexToSdfValue } = this;
+            for (let vertexIndex = 0; vertexIndex < vertexIndexToCorner.length; vertexIndex++) {
+                const sdfValue = vertexIndexToSdfValue[vertexIndex];
+                // Bottom graph values.
+                const backLeftGraph = vertexIndexToCornersGraph[vertexIndex];
+                if (!backLeftGraph.RIGHT ||
+                    !backLeftGraph.FORWARD ||
+                    !backLeftGraph.UP) {
+                    // On the edge, so we can't move ward
+                    // Should be % {11, 121, 121 * 11, given the current sizing} == 0 
+                    // console.log(vertexIndex);
+                    continue;
+                }
+                const backRightGraph = vertexIndexToCornersGraph[backLeftGraph.RIGHT];
+                if (!backRightGraph) {
+                    // I think there's a bug when finding directions that is adding things that aren't possible.
+                    continue;
+                }
+
+                const frontRightGraph = vertexIndexToCornersGraph[backRightGraph.FORWARD];
+                const frontLeftGraph = vertexIndexToCornersGraph[backLeftGraph.FORWARD];
+
+                if (!frontRightGraph || !frontLeftGraph) {
+                    // I think there's a bug when finding directions that is adding things that aren't possible.
+                    continue;
+                }
+
+                // indices => vertex x, y, z values.
+                const corners = [
+                    // bottom backLeft
+                    vertexIndex,
+                    // bottom backRight
+                    backLeftGraph.RIGHT,
+                    // bottom frontRight
+                    backRightGraph.FORWARD,
+                    // bottom frontLeft
+                    backLeftGraph.FORWARD,
+                    // top BackLeft
+                    backLeftGraph.UP,
+                    // top BackRight
+                    backRightGraph.UP,
+                    // top FrontRight
+                    frontRightGraph.UP,
+                    // top FrontLeftGraph
+                    frontLeftGraph.UP,
+                ];
+
+                let edgeTableIndex = 0;
+
+                for (let i = 0; i < corners.length; i++) {
+                    // The corners just store index numbers after all.
+                    const corner = corners[i];
+
+                    // Check if this cube's corner is inside, and build up the edgeTableIndex
+                    // conditionally.
+                    const sdfValue = vertexIndexToSdfValue[corner];
+                    if (sdfValue < 0) {
+                        continue;
+                    }
+                    const mask = 2 ** i;
+                    edgeTableIndex |= mask;
+                }
+
+                if (edgeTableIndex) {
+                    // Generate from triangles.
+                    this.generateTriangles(corners, edgeTableIndex);
+                }
+            }
+        }
+
+        marchCubes() {
+            // Populates:
+            // this.vertexIndexToCorner
+            // this.vertexIndexToCornersGraph
+            // this.vertexIndexToSdfValue
+            this.indexCorners();
+
+            // Populates:
+            // this.vertexIndexToTriangleVertex
+            // this.edgeToVertexIndex
+            // this.triangles
+            this.generateTrianglesFromCorners();
+
+            // At this point we have 
+            //  * All triangles (made up of indices into vertexIndexToTriangleVertex)
+            //  * All the vertices mapped by their index (in vertexIndexToTriangleVertex)
+            // It's enough to draw them using drawElements.
+            this.state.indexedMesh.vertices.data = new Float32Array(this.vertexIndexToTriangleVertex);
+            this.state.indexedMesh.normals.data = new Float32Array(this.vertexIndexToVertexNormal);
+            this.state.indexedMesh.indices.data = new Uint32Array(this.triangles);
+            viz.setupBuffer(this.state.indexedMesh.vertices);
+            viz.setupBuffer(this.state.indexedMesh.normals);
+            viz.setupBuffer(this.state.indexedMesh.indices, 'ELEMENT_ARRAY_BUFFER');
+
+            this.state.indexedMesh.callback = (gl) => {
+                // Might need to go to unsigned short (gl.UNSIGNED_SHORT), should work for number of indices.
+                gl.drawElements(gl.TRIANGLES, this.state.indexedMesh.indices.data.length, gl.UNSIGNED_INT, 0);
+            }
+        }
+
+        updateBoundingBox() {
+            if (!this.state.boundingBox.enabled) {
+                return;
+            }
+            const start = -this.size * 0.5;
+            const end = this.size * 0.5;
+            const { cubeSize: s } = this;
+
+            // Draw a bounding box around the march area for debug/viz.
+            const lines = [];
+
+            // lines left to right
+            lines.push(start, start, start);
+            lines.push(end, start, start);
+            lines.push(start, end, start);
+            lines.push(end, end, start);
+            lines.push(start, start, end);
+            lines.push(end, start, end);
+            lines.push(start, end, end);
+            lines.push(end, end, end);
+
+            // // lines bottom to top
+            lines.push(start, start, start);
+            lines.push(start, end, start);
+            lines.push(end, start, start);
+            lines.push(end, end, start);
+            lines.push(start, start, end);
+            lines.push(start, end, end);
+            lines.push(end, start, end);
+            lines.push(end, end, end);
+
+            // lines back to front.
+            lines.push(start, start, start);
+            lines.push(start, start, end);
+            lines.push(end, start, start);
+            lines.push(end, start, end);
+            lines.push(start, end, start);
+            lines.push(start, end, end);
+            lines.push(end, end, start);
+            lines.push(end, end, end);
+
+            this.state.boundingBox.data = new Float32Array(lines);
+            this.state.boundingBox.callback = (gl) => gl.drawArrays(gl.LINES, 0, lines.length / 3);
+            viz.setupBuffer(this.state.boundingBox);            
+        }
+
+        reset() {
+            this.vertexIndexToCorner = [];
+            this.vertexIndexToCornersGraph = [];
+            this.vertexIndexToSdfValue = [];
+            this.vertexIndexToTriangleVertex = [];
+            this.vertexIndexToVertexNormal = [];
+            this.edgeToVertexIndex = {}
+            this.triangles = [];
+            this.vertList = new Array(12);
+        }
+
+        march = () => {
+            this.reset();
+            this.updateGrid();
+            this.updateBoundingBox();
+            this.marchCubes();
+        }
+    }
+
+    class Viz {
+        constructor() {
+            this.canvas = document.getElementById('canvas');
+            this.ctx = this.canvas.getContext('webgl2', {
+                alpha: true,
+                antialias: true,
+                depth: true,
+                premultipliedAlpha: false,
+            });
+            this.state = {};
+            this.cameraPosition = {
+                x: 0,
+                y: 0,
+                z: 4,
+            };
+            this.toggleRotate = false;
+
+            this.setupMatrices();
+            this.setupGL();
+        }
+
+        setupMatrices = () => {
+            const { mat4, vec3 } = glMatrix;
+            this.modelMatrix = mat4.create();
+
+            this.viewMatrix = mat4.create();
+            // viewer centre, view direction, up
+            const { x, y, z } = this.cameraPosition;
+            mat4.lookAt(this.viewMatrix, vec3.fromValues(x, y, z), vec3.fromValues(0, 0, -1), vec3.fromValues(0, 1, 0));
+
+            this.projectionMatrix = mat4.create();
+            mat4.perspective(this.projectionMatrix, Math.PI / 3, 1, 0.1, 1000);
+        }
+
+        setupGL() {
+            const { ctx: gl } = this;
+
+            gl.enable(gl.BLEND);
+            // Needed for alpha and depth testing.
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.LEQUAL);
+            gl.depthRange(0.1, 1000);
+
+            gl.depthMask(true);
+
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+            this.setupShaders();
+        }
+
+        setupShaders() {
+            const { ctx: gl } = this;
+
+            const uniforms = [
+                'u_model_matrix',
+                'u_view_matrix',
+                'u_projection_matrix',
+                'u_colour',
+                'u_opacity',
+                'u_time',
+                'u_rotate',
+                'u_use_falloff',
+            ];
+
+            const attributes = [
+                'a_position',
+                'a_normal',
+            ];
+
+            // Version must be on the first line.
+            const vertCode = `#version 300 es
+                precision highp float;
+                uniform mat4 u_model_matrix;
+                uniform mat4 u_view_matrix;
+                uniform mat4 u_projection_matrix;
+                uniform float u_time;
+                uniform bool u_rotate;
+
+                in vec3 a_position;
+                in vec3 a_normal;
+
+                out vec3 v_position;
+                // Use flat shading for this normal.
+                // flat out vec3 v_normal;
+                out vec3 v_normal;
+
+                void main(void) {
+                    // This but for R4:
+                    // https://en.wikipedia.org/wiki/Rotation_matrix#Basic_rotations
+                    mat4 rotation = mat4(1.);
+                    if (u_rotate) {
+                        mat4 rotationX = mat4(1.);
+                        rotationX[1][1] = cos(u_time);
+                        rotationX[1][2] = sin(u_time);
+                        rotationX[2][1] = -sin(u_time);
+                        rotationX[2][2] = cos(u_time);
+
+                        mat4 rotationY = mat4(1.);
+                        rotationY[0][0] = cos(u_time);
+                        rotationY[0][2] = sin(u_time);
+                        rotationY[2][0] = -sin(u_time);
+                        rotationY[2][2] = cos(u_time);
+
+                        mat4 rotationZ = mat4(1.);
+                        rotationZ[0][0] = cos(u_time);
+                        rotationZ[0][1] = sin(u_time);
+                        rotationZ[1][0] = -sin(u_time);
+                        rotationZ[1][1] = cos(u_time);
+
+                        rotation = rotationZ * rotationY * rotationX;
+                    }
+
+                    gl_Position = u_projection_matrix * u_view_matrix * u_model_matrix * rotation * vec4(a_position, 1.);
+                    v_position = a_position;
+                    v_normal = a_normal;
+                }
+            `
+
+            // Version must be on the first line.
+            const fragCode = `#version 300 es
+                precision highp float;
+                uniform vec3 u_colour;
+                uniform float u_opacity;
+                uniform bool u_use_falloff;
+
+                in vec3 v_position;
+                in vec3 v_normal;
+                out vec4 colour;
+
+                void main(void) {
+                    float falloff = 1. - distance(vec3(0.), v_position) / 1.;
+                    vec3 normal = abs(normalize(v_normal));
+                    // vec3 base_colour = normal;
+                    vec3 base_colour = u_colour;
+                    if (u_use_falloff) {
+                        float inv_falloff = 1. - falloff;
+                        base_colour = base_colour * inv_falloff + vec3(0, 1., 0.5) * falloff;
+                    }
+                    colour = vec4(base_colour, u_opacity);
+                }
+            `
+
+            this.state[SHADER_NAME] = new Shader(gl, vertCode, fragCode);
+            this.state[SHADER_NAME].cacheUniformLocations(gl, uniforms);
+            this.state[SHADER_NAME].cacheAttributeLocations(gl, attributes);
+
+            // We reuse the same shader over and over, so we an make this the program we use right here.
+            // If we need to switch shaders between draw calls, we'll then have to move this to draw()
+            const { [SHADER_NAME]: shader } = this.state;
+            const { program } = shader;           
+
+            gl.useProgram(program);
+        }
+
+        setupBuffer(obj, type = 'ARRAY_BUFFER') {
+            const { ctx: gl } = this;
+
+            const bufferType = gl[type];
+            if (obj.buffer) {
+                gl.deleteBuffer(obj.buffer);
+            }
+
+            const buffer = gl.createBuffer();
+            gl.bindBuffer(bufferType, buffer);
+            gl.bufferData(bufferType, obj.data, gl.DYNAMIC_DRAW);
+            obj.buffer = buffer;
+        }
+
+        clear() {
+            const { ctx: gl } = this;
+
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        }
+
+        draw(obj, timestamp = 0) {
+            const { ctx: gl } = this;
+            const { buffer, callback, opacity, enabled, colour, hasIndices, hasNormals } = obj;
+            const { [SHADER_NAME]: shader } = viz.state;
+            const { program } = shader;
+            if (!enabled) {
+                return;
+            }
+
+            if (hasIndices && hasNormals) {
+                // 'indexedMesh' case, per-vertex normals.
+                // the vertices, though they are indexed (e.g. [-1.23, 0.3, 3.0, ...]).
+                gl.bindBuffer(gl.ARRAY_BUFFER, obj.vertices.buffer);
+                gl.vertexAttribPointer(shader.a_positionLocation, 3, gl.FLOAT, false, 12, 0);
+                gl.enableVertexAttribArray(shader.a_positionLocation);
+                gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+                // Assume it has normals.
+                gl.bindBuffer(gl.ARRAY_BUFFER, obj.normals.buffer);
+                gl.vertexAttribPointer(shader.a_normalLocation, 3, gl.FLOAT, false, 12, 0);
+                gl.enableVertexAttribArray(shader.a_normalLocation);
+                gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+                // bind side by side with array_buffer
+                // the triangles mapped by index to the vertices above (e.g. [0, 1, 2, 2, 1, 0]).
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, obj.indices.buffer);
+            } else {
+                // Default case.
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                gl.vertexAttribPointer(shader.a_positionLocation, 3, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(shader.a_positionLocation);                
+            }
+
+            gl.uniform1f(shader.u_timeLocation, timestamp);
+            gl.uniform1i(shader.u_use_falloffLocation, obj.useFalloff)
+            gl.uniform1i(shader.u_rotateLocation, this.toggleRotate);
+
+            gl.uniform3fv(shader.u_colourLocation, colour);
+            gl.uniform1f(shader.u_opacityLocation, opacity);
+            gl.uniformMatrix4fv(shader.u_model_matrixLocation, false, this.modelMatrix);
+            gl.uniformMatrix4fv(shader.u_view_matrixLocation, false, this.viewMatrix);
+            gl.uniformMatrix4fv(shader.u_projection_matrixLocation, false, this.projectionMatrix);
+
+            // Responsible for the actual draw calls.
+            callback(gl);
+
+            // Need to disable if it was previously enabled for the normal draw
+            gl.disableVertexAttribArray(shader.a_positionLocation);
+            gl.disableVertexAttribArray(shader.a_normalLocation);
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        }
+    }
+
+    function setupControls(viz, mc, sdf) {
+        const gui = new dat.GUI();
+        gui.width *= 1.5;
+
+        const folderMarching = gui.addFolder('Marching Cubes');
+        folderMarching.open();
+        folderMarching.add(mc, 'size', 1, 100, 1).name('Box Size');
+        folderMarching.add(mc, 'cubeSize', 0.005, 2, 0.001).name('Cube Size');
+        folderMarching.add(mc, 'toggleInterpolate').name('Interpolate');
+
+        const folderViz = gui.addFolder('Visualization');
+        folderViz.open();
+        {
+            const max = 100;
+            const min = -max;
+
+            const props = ['x', 'y', 'z'];
+            props.forEach(p => {
+                const ctl = folderViz.add(viz.cameraPosition, p, min, max, 0.1);
+                ctl.name(`Camera ${p}`);
+                ctl.onChange(viz.setupMatrices);
+            });
+        }
+        folderViz.add(viz, 'toggleRotate').name('Rotate');
+        folderViz.add(sdf, 'velocity', 0.005, 0.3, 0.001).name('Velocity');
+        folderViz.add(sdf, 'unionK', 0.05, 1, 0.001).name('Union K Value');
+
+        const folderDebug = gui.addFolder('Debug');
+        folderDebug.open();
+        folderDebug.add(mc, 'toggleMarchingCubesDebug').name('Show Cubes');
+        folderDebug.add(mc, 'toggleBoxDebug').name('Show Box');
+    }
+
+    const { width, height } = document.getElementById('canvas');
+
+    const sdf = new SDF();
+    const viz = new Viz();
+    const mc = new MarchingCubes(sdf, viz);
+
+    setupControls(viz, mc, sdf);
+
+        // Initial march until we recompute things based on controls interaction or animation.
+    mc.march();
+
+    const update = (timestamp) => {
+        // After marching we can then update the visualization.
+        // const time = timestamp * 0.00025;
+        const time = timestamp * 0.0003;
+        viz.clear();
+
+        if (mc.toggleMarchingCubesDebug) {
+            viz.draw(mc.state.grid, time);
+        }
+        if (mc.toggleBoxDebug) {
+            viz.draw(mc.state.boundingBox, time);
+        }
+
+        // viz.draw(mc.state.mesh, time);
+        viz.draw(mc.state.indexedMesh, time);
+
+        sdf.update(mc.size);
+        mc.march();
+
+        // viz.draw(mc.state.points, time);
+        window.requestAnimationFrame(update);
+    }
+
+    window.requestAnimationFrame(update);
+
+    </script>
+</html>

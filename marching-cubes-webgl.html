@@ -1,0 +1,1916 @@
+<html>
+    <head>
+        <title>Marching Cubes - WebGL</title>
+        <style>
+            body {
+                background-color: black;
+                margin: 0;
+                padding: 0;
+                position: relative;
+            }
+            #main {
+                display: flex;
+                height: 100%;
+                justify-content: center;
+                align-items: center;
+            }
+            canvas {
+                height: 100%;
+            }
+        </style>
+    </head>
+    <body>
+        <section id="main">
+            <canvas id="canvas" height="1024" width="1024"></canvas>
+        </section>
+    </body>
+    <script src="lib/dat.gui.js"></script>
+    <script src="lib/gl-matrix.js"></script>
+    <script>
+
+    /*
+     * Random Learnings, Links, Resources
+     *
+     * = Per Vertex Normals =
+     *
+     * https://stackoverflow.com/questions/18519586/calculate-normal-per-vertex-opengl
+     * http://www.euclideanspace.com/maths/algebra/vectors/applications/normals/index.htm
+     * Per vertex normal
+     * "We can now calculate this by adding the normals for each face adjoining the vertex, and then normalising."
+     * I guess another option is that, because we're dealing with known shapes, we can use the gradient and get the
+     * vector normal to the surface at the point... Though this won't work well after making modifications to the SDF.
+     * const normal = averagedNormal(vert);
+     *
+     * Specific to marching cubes:
+     * https://stackoverflow.com/a/21755487
+     *
+     * Gradient-based solution:
+     * https://stackoverflow.com/a/29922941 (something about weighting, from GPU Gems 3 Ch 1)
+     * https://developer.nvidia.com/gpugems/gpugems3/part-i-geometry/chapter-1-generating-complex-procedural-terrains-using-gpu
+     * This relies on a density function being differentiable but i'm not sure if mine are (the SDFs might be...?), also based
+     * on the code, it looks like they sample a texture and then do the gradient based on that, which won't work here
+     * necessarily? (It does appear to be similar to what we do when we use the SDF below, so it makes sense):
+     *
+     * float d = 1.0/(float)voxels_per_block;
+     * float3 grad;
+     * grad.x = density_vol.Sample(TrilinearClamp, uvw + float3( d, 0, 0)) - density_vol.Sample(TrilinearClamp, uvw + float3(-d, 0, 0));
+     * grad.y = density_vol.Sample(TrilinearClamp, uvw + float3( 0, d, 0)) - density_vol.Sample(TrilinearClamp, uvw + float3( 0,-d, 0));
+     * grad.z = density_vol.Sample(TrilinearClamp, uvw + float3( 0, 0, d)) - density_vol.Sample(TrilinearClamp, uvw + float3( 0, 0,-d));
+     * output.wsNormal = -normalize(grad);
+     *
+     * https://gamedev.stackexchange.com/a/97716 (basically use a structure to index tris/verts)
+     *
+     * Better solutions using cube corners + interpolation:
+     * https://www.gamedev.net/forums/topic/526869-marching-cubes-vertex-normals/
+     * "You can also create the normals directly from the volume data.. probably would look smoother if you did that.
+     * Multiple ways to do it depending on if you want a smoother or more detailed appearance. If you don't know how to
+     * do this, it is basically the same as finding the normal of a height field except you have a third dimension."
+     * (since i'm working on a torus we can use torus data for that and gradients i guess?).
+     * "Okay, I think I solved it. What I did is to calculate the vertex normal for each cube corner and then interpolate
+     * it with the vertex values. Results look correct as far as I can tell. Is that a possible, correct way of doing it?"
+     * "Yep, that should work. You don't need each cube corner though, as an vertex lies on one edge. So you just need to
+     * interpolate between the normals at the two ends of the edge."
+     *
+     * https://www.gamedev.net/forums/topic/355340-calculating-vertex-normals-solved/
+     * More helpful algorithms there
+     *
+     * https://www.iquilezles.org/www/articles/normals/normals.htm
+     * Whole-mesh per-vertex normal computation. We'd need to setup the geometry properly post-march
+     * to get this working.
+     *
+     * https://community.khronos.org/t/identifying-adjacent-triangles/32734/6
+     * Helpful data structures for finding adjacency / shared faces.
+     *
+     * https://www.npmjs.com/package/simplicial-complex this will probably do the trick!
+     *
+     */
+
+    // http://paulbourke.net/geometry/polygonise/
+    // The tri table has 256 * 16 possible arrangements making 4096 things to pick from,
+    // where 4096 in hex is 0x1000 which is why this goes from 0x0 -> 0xfff. As a result
+    // it lets us pick which tris are made with edges from this table.
+    const EDGE_TABLE = [
+        0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+        0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+        0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+        0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+        0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+        0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+        0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
+        0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+        0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
+        0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+        0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
+        0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+        0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
+        0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+        0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
+        0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+        0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+        0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+        0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+        0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+        0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+        0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+        0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+        0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
+        0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+        0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
+        0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+        0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
+        0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+        0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
+        0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+        0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0 
+    ];
+
+    // http://paulbourke.net/geometry/polygonise/
+    const TRI_TABLE = [
+        [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1],
+        [3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1],
+        [3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1],
+        [3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1],
+        [9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1],
+        [9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1],
+        [2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1],
+        [8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1],
+        [9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1],
+        [4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1],
+        [3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1],
+        [1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1],
+        [4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1],
+        [4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1],
+        [5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1],
+        [2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1],
+        [9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1],
+        [0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1],
+        [2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1],
+        [10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1],
+        [4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1],
+        [5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1],
+        [5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1],
+        [9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1],
+        [0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1],
+        [1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1],
+        [10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1],
+        [8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1],
+        [2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1],
+        [7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1],
+        [2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1],
+        [11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1],
+        [5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1],
+        [11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1],
+        [11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1],
+        [1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1],
+        [9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1],
+        [5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1],
+        [2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1],
+        [5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1],
+        [6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1],
+        [3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1],
+        [6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1],
+        [5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1],
+        [1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1],
+        [10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1],
+        [6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1],
+        [8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1],
+        [7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1],
+        [3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1],
+        [5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1],
+        [0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1],
+        [9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1],
+        [8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1],
+        [5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1],
+        [0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1],
+        [6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1],
+        [10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1],
+        [10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1],
+        [8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1],
+        [1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1],
+        [0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1],
+        [10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1],
+        [3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1],
+        [6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1],
+        [9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1],
+        [8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1],
+        [3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1],
+        [6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1],
+        [0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1],
+        [10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1],
+        [10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1],
+        [2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1],
+        [7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1],
+        [7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1],
+        [2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1],
+        [1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1],
+        [11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1],
+        [8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1],
+        [0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1],
+        [7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1],
+        [10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1],
+        [2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1],
+        [6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1],
+        [7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1],
+        [2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1],
+        [1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1],
+        [10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1],
+        [10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1],
+        [0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1],
+        [7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1],
+        [6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1],
+        [8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1],
+        [6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1],
+        [4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1],
+        [10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1],
+        [8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1],
+        [0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1],
+        [1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1],
+        [8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1],
+        [10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1],
+        [4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1],
+        [10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1],
+        [5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1],
+        [11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1],
+        [9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1],
+        [6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1],
+        [7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1],
+        [3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1],
+        [7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1],
+        [9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1],
+        [3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1],
+        [6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1],
+        [9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1],
+        [1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1],
+        [4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1],
+        [7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1],
+        [6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1],
+        [3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1],
+        [0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1],
+        [6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1],
+        [0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1],
+        [11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1],
+        [6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1],
+        [5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1],
+        [9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1],
+        [1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1],
+        [1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1],
+        [10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1],
+        [0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1],
+        [5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1],
+        [10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1],
+        [11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1],
+        [9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1],
+        [7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1],
+        [2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1],
+        [8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1],
+        [9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1],
+        [9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1],
+        [1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1],
+        [9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1],
+        [9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1],
+        [5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1],
+        [0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1],
+        [10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1],
+        [2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1],
+        [0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1],
+        [0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1],
+        [9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1],
+        [5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1],
+        [3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1],
+        [5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1],
+        [8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1],
+        [9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1],
+        [0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1],
+        [1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1],
+        [3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1],
+        [4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1],
+        [9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1],
+        [11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1],
+        [11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1],
+        [2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1],
+        [9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1],
+        [3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1],
+        [1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1],
+        [4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1],
+        [4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1],
+        [3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1],
+        [3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1],
+        [0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1],
+        [9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1],
+        [1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+        [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+    ];
+
+    // Using the mask against the value from EDGE_TABLE[edgeTableIndex], we determine whether
+    // we should add the vertex we interpolate between corners[startIdx] and
+    // corners[endIdx].
+    // TODO
+    // Using this would be a great way to help us index and reuse vertices across the same
+    // triangle, as long as we know the index of the edge itself.
+    // For example, if edge 1 is used in two cubes, then the vertex we get whe considering
+    // edge 1 is the same for the triangles we'd get in the first cube and the second.
+    const EDGE_TABLE_TO_VERT_LIST = [
+        // back bottom
+        { mask: 1, startIdx: 0, endIdx: 1 }, 
+        // right bottom
+        { mask: 2, startIdx: 1, endIdx: 2 }, 
+        // front bottom
+        { mask: 4, startIdx: 2, endIdx: 3 }, 
+        // left bottom
+        { mask: 8, startIdx: 3, endIdx: 0 }, 
+        // back top
+        { mask: 16, startIdx: 4, endIdx: 5 }, 
+        // right top
+        { mask: 32, startIdx: 5, endIdx: 6 }, 
+        // front top
+        { mask: 64, startIdx: 6, endIdx: 7 }, 
+        // left top
+        { mask: 128, startIdx: 7, endIdx: 4 }, 
+        // back left
+        { mask: 256, startIdx: 0, endIdx: 4 }, 
+        // back right
+        { mask: 512, startIdx: 1, endIdx: 5 }, 
+        // front right
+        { mask: 1024, startIdx: 2, endIdx: 6 }, 
+        // front left
+        { mask: 2048, startIdx: 3, endIdx: 7 }, 
+    ];
+
+    const { glMatrix } = window;
+
+    const SHADER_NAME = 'shader';
+
+    const TEXTURE_NONE = -1;
+    const TEXTURE_POLKA_DOT = 0;
+    const TEXTURE_CHECKERBOARD = 1;
+
+    const TEXTURE_OPTIONS = [
+        { name: 'No Texture', enum: TEXTURE_NONE },
+        { name: 'Polka Dots', enum: TEXTURE_POLKA_DOT },
+        { name: 'Checkerboard', enum: TEXTURE_CHECKERBOARD },
+    ];
+
+    class Animate {
+        constructor(sdf, mc, viz) {
+            this.sdf = sdf;
+            this.mc = mc;
+            this.viz = viz;
+            this.toggleAnimate = false;
+            this.animationState = null
+
+            this.stepToDurationSeconds = {
+                INTRO: 6,
+                DISPLAY: 16,
+                OUTRO: 4,
+            };
+
+            this.stepToNextStep = {
+                INTRO: 'DISPLAY',
+                DISPLAY: 'OUTRO',
+                OUTRO: 'INTRO',
+            };
+        }
+
+        startAnimation() {
+            this.toggleAnimate = !this.toggleAnimate;
+            if (this.toggleAnimate) {
+                const canvas = document.getElementById('canvas')
+                canvas.onfullscreenchange = (e) => {
+                    if (!document.fullscreenElement) {
+                        this.teardown();
+                        this.toggleAnimate = false;
+                    }
+                };
+                canvas.requestFullscreen();
+                this.init();
+            } else {
+                this.teardown();
+            }
+        }
+
+        init() {
+            const { mc } = this;
+            this.animationState =  {
+                // One of INTRO, DISPLAY, OUTRO, cycling through in that order
+                step: 'INTRO',
+                stepStart: null,
+            };
+
+            mc.cubeSize = 0.02;
+            mc.state.boundingBox.enabled = false;
+            mc.state.grid.enabled = false;
+            mc.state.mesh.opacity = 0
+            // mc.state.mesh.debugNormals = false;
+            mc.march();
+        }
+
+        teardown() {
+            this.animationState = null;
+            mc.cubeSize = 0.2;
+            mc.state.boundingBox.enabled = true;
+            mc.state.grid.enabled = true;
+            mc.state.mesh.opacity = 1;
+            // mc.state.mesh.debugNormals = true;
+            mc.march();
+        }
+
+        updateAnimationState = (timestamp) => {
+            const { mc, sdf, animationState } = this;
+            const { step, stepStart } = animationState;
+            if (stepStart === null) {
+                this.animationState.stepStart = timestamp;
+            } else {
+                const dt = timestamp - stepStart;
+                if (step === 'INTRO') {
+                    mc.state.mesh.opacity = (dt) / (360 * this.stepToDurationSeconds[step]);
+                }
+                if (step === 'OUTRO') {
+                    // At the very end of this there isn't enough time for the sync to screen
+                    // before march() is called, and blocks the main thread from updating.
+                    // We need to wait for synchronization before calling march again so there's a delay
+                    // here.
+                    mc.state.mesh.opacity = Math.max(1 - (dt) / (360 * this.stepToDurationSeconds[step]), 0);
+                }
+                if (dt > 360 * this.stepToDurationSeconds[step]) {
+                    const nextStep = this.stepToNextStep[step];
+                    this.animationState.step = nextStep;
+                    this.animationState.stepStart = null;
+
+                    // go to the next step.
+                    if (nextStep === 'INTRO') {
+                        // switch to new shape
+                        sdf.state.sdfLibraryIndex++;
+                        if (sdf.state.sdfLibraryIndex === sdf.sdfLibrary.length) {
+                            sdf.state.sdfLibraryIndex = 0;
+                        }
+                        sdf.currentSdf = sdf.sdfLibrary[sdf.state.sdfLibraryIndex];
+                        // HACK:
+                        // At the very end of this there isn't enough time for the sync to screen
+                        // before march() is called, and blocks the main thread from updating.
+                        // We need to wait for synchronization before calling march again so there's a delay
+                        // here.
+                        setTimeout(() => mc.march(), 1);
+                        // mc.march();
+                    }
+                }
+            }
+        }
+    }
+
+    class SDF {
+        constructor() {
+            this.state = {
+                animateTransition: false,
+                sdfLibraryIndex: 0,
+            }
+
+            this.sdfLibrary = [
+                // The default, regular old torus.
+                // (p) => {
+                //     let d = this.sdfTorus(p, 0.6, 0.2);
+                //     return d;
+                // },
+                // Twisted torus
+                (p) => {
+                    p = this.opTwist(p);
+                    let d = this.sdfTorus(p, 0.6, 0.2);
+                    return d;
+                },
+                // A box hollowed out by an intersection with a sphere around the origin.
+                (p) => {
+                    let d = this.sdfBox(p, [0.4, 0.4, 0.4]);
+                    let d1 = this.sdfSphere(p, 0.4, [0, 0, 0]);
+                    d = this.opSmoothSubtraction(d1, d);
+                    return d;
+                },
+                // A box hollowed out by an intersection with a sphere around the origin.
+                (p) => {
+                    let d = this.sdfBox(p, [0.4, 0.4, 0.4]);
+                    let d1 = this.sdfSphere(p, 0.45, [0, 0, 0]);
+                    d = this.opSmoothSubtraction(d1, d);
+                    return d;
+                },
+                // A twisted, bent torus
+                (p) => {
+                    p = this.opBend(p);
+                    p = this.opTwist(p);
+                    let d = this.sdfTorus(p, 0.6, 0.2);
+                    return d;
+                },
+                // A bent torus
+                (p) => {
+                    p = this.opBend(p);
+                    let d = this.sdfTorus(p, 0.6, 0.2);
+                    return d;
+                },
+                // A bulging box
+                (p) => {
+                    let d = this.sdfBox(p, [0.7, 0.2, 0.7]);
+                    let d1 = this.sdfSphere(p, 0.6, [0, 0, 0]);
+                    d = this.opSmoothUnion(d, d1);
+                    // To subtract the sphere from the box.
+                    // d = this.opSmoothSubtraction(d1, d);
+                    return d;
+                },
+                // // 2 connected balls
+                // (p) => {
+                //     // p = this.opTwist(p);
+                //     // If twisting, turn off per-vert normal and interpolate
+                //     let d = this.sdfSphere(p, 2 * 0.175, [0, 0, 0]);
+                //     let d1 = this.sdfSphere(p, 2 * 0.25, [-0.4, 0, 0.4]);
+                //     d = this.opSmoothUnion(d, d1);
+                //     // d = this.opSmoothSubtraction(d1, d);
+                //     return d;
+                // },
+                // 5 connected balls in ascending size
+                (p) => {
+                    let d = this.sdfSphere(p, 0.35, [-0.45, -0.45, -0.45]);
+                    let d1 = this.sdfSphere(p, 0.3, [-0.15, -0.15, -0.15]);
+                    let d2 = this.sdfSphere(p, 0.25, [0.1, 0.1, 0.1]);
+                    let d3 = this.sdfSphere(p, 0.2, [0.35, 0.35, 0.35])
+                    let d4 = this.sdfSphere(p, 0.15, [0.45, 0.45, 0.45])
+                    d = this.opSmoothUnion(d, d1);
+                    d = this.opSmoothUnion(d, d2);
+                    d = this.opSmoothUnion(d, d3);
+                    d = this.opSmoothUnion(d, d4);
+                    return d;
+                },
+                // 3 connected balls small-big-small
+                (p) => {
+                    let d = this.sdfSphere(p, 0.25, [-0.45, -0.45, -0.45]);
+                    let d1= this.sdfSphere(p, 0.5, [0.0, 0.0, 0.0]);
+                    let d2 = this.sdfSphere(p, 0.25, [0.45, 0.45, 0.45])
+                    d = this.opSmoothUnion(d, d1);
+                    d = this.opSmoothUnion(d, d2);
+                    return d;
+                },
+                // Slightly twisted fat torus
+                (p) => {
+                    p = this.opTwist(p, 2);
+                    let d = this.sdfTorus(p, 0.5, 0.4);
+                    return d;
+                },
+                 // Very twisted fat torus
+                 (p) => {
+                    p = this.opTwist(p, 6);
+                    let d = this.sdfTorus(p, 0.5, 0.4);
+                    return d;
+                },
+                // Fat torus
+                (p) => {
+                    let d = this.sdfTorus(p, 0.5, 0.4);
+                    return d;
+                },
+                // Elongated skinny torus
+                (p) => {
+                    const primitive = (p) => this.sdfTorus(p, 0.3, 0.1);
+                    const d = this.opElongate(primitive, p, [0.3, 0.2, 0.3]);
+                    return d;
+                },
+                // Bent, elongated skinny torus
+                (p) => {
+                    p = this.opBend(p, 0.2);
+                    const primitive = (p) => this.sdfTorus(p, 0.3, 0.15);
+                    const d = this.opElongate(primitive, p, [0.4, 0.4, 0.0]);
+                    return d;
+                },
+                // Elongated, smoothunioned toruses.
+                (p) => {
+                    const dp1 = [p[0] - 0.28, p[1], p[2]];
+                    const dp2 = [p[0] + 0.28, p[1], p[2]];
+                    const p1 = (p) => this.sdfTorus([p[0] - 0.32, p[1], p[2]], 0.3, 0.15);
+                    const p2 = (p) => this.sdfTorus([p[0] + 0.32, p[1], p[2]], 0.3, 0.15);
+                    let d1 = this.opElongate(p1, p, [0, 0.3, 0]);
+                    let d2 = this.opElongate(p2, p, [0, 0.3, 0]);
+                    return this.opSmoothUnion(d1, d2);
+                },
+                // Bent fat torus, removed bad edges
+                (p) => {
+                    // don't include things beyond the x at a certain point.
+                    const xBounds = 0.315;
+                    p[0] = Math.max(-xBounds, Math.min(p[0], xBounds));
+                    p = this.opBend(p, -5);
+                    let d = this.sdfTorus(p, 0.7, 0.3);
+                    return d;
+                },
+                // Bent fat torus, removed bad edges, bent further.
+                (p) => {
+                    // don't include things beyond the x at a certain point.
+                    const xBounds = 0.6;
+                    p[0] = Math.max(-xBounds, Math.min(p[0], xBounds));
+                    p = this.opBend(p, -8);
+                    let d = this.sdfTorus(p, 0.7, 0.3);
+                    return d;
+                },
+                // Bent, elongated sphere along x.
+                (p) => {
+                    // don't include things beyond the x at a certain point.
+                    p = this.opBend(p, -0.5);
+                    const prim = (p) => this.sdfSphere(p, 0.5, [0, 0, 0]);
+                    let d = this.opElongate(prim, p, [0.5, 0, 0]);
+                    return d;
+                },
+                // A sphere cut by a box with some bending.
+                (p) => {
+                    p = this.opBend(p, -0.6);
+                    let d = this.sdfBox(p, [0.7, 0.15, 0.7]);
+                    let d1 = this.sdfSphere(p, 0.6, [0, 0, 0]);
+                    d = this.opSmoothSubtraction(d, d1);
+                    // To subtract the sphere from the box.
+                    // d = this.opSmoothSubtraction(d1, d);
+                    return d;
+                },
+                // WIP
+                // Something with opRevolution
+                // (p) => {
+                //     const q = this.opRevolution(p, 0.3);
+                //     return this.sdfCircle(q, 0.2);
+                // }
+                // 6 boxes repeated vertically.
+                // (p) => {
+                //     let d = Number.MAX_SAFE_INTEGER;
+                //     // need to translate the point to make the box around it.
+                //     const boxX = 0.5;
+                //     const boxY = 0.05;
+                //     const boxZ = 0.5;
+
+                //     for (let y = -0.5; y <= 0.5; y += 0.2) {
+                //         // traverse along the x-axis.
+                //         const boxD = this.sdfBox(
+                //             [p[0], p[1] + y, p[2]],
+                //             [boxX , boxY, boxZ]
+                //         );
+                //         d = Math.min(d, boxD);
+                //     }
+                //     return d;
+                // },
+                // wip
+                // Octahedron
+                // (p) => {
+                //     const primitive = (p) => this.sdfOctahedron(p, 0.6);
+                //     let d = this.opElongate(primitive, p, [0.1, 0.2, 0.1]);
+                //     return d;
+                // },
+            ];
+            this.state.sdfLibraryIndex = this.sdfLibrary.length - 1;
+            this.currentSdf = this.sdfLibrary[this.state.sdfLibraryIndex];
+        }
+
+        opSmoothUnion(d1, d2, k = 0.1) {
+            // float opSmoothUnion( float d1, float d2, float k ) {
+            // float h = clamp( 0.5 + 0.5*(d2-d1)/k, 0.0, 1.0 );
+            // return mix( d2, d1, h ) - k*h*(1.0-h); }
+            // Mix:
+            // https://www.khronos.org/registry/OpenGL-Refpages/gl4/html/mix.xhtml
+            // x Specify the start of the range in which to interpolate.
+            // y Specify the end of the range in which to interpolate.
+            // a Specify the value to use to interpolate between x and y.
+            // "x * (1 - a) + y * a"
+            const v = 0.5 + 0.5 * (d2 - d1) / k;
+            const h = Math.max(0, Math.min(v, 1));
+
+            const mixed = d2 * (1 - h) + d1 * h;
+            return mixed - k * h * (1 - h);
+        }
+
+        opSmoothSubtraction(d1, d2, k = 0.1) {
+            // float opSmoothSubtraction( float d1, float d2, float k ) {
+            // float h = clamp( 0.5 - 0.5*(d2+d1)/k, 0.0, 1.0 );
+            // return mix( d2, -d1, h ) + k*h*(1.0-h); }
+            const v = 0.5 - 0.5 * (d2 + d1) / k;
+            const h = Math.max(0, Math.min(v, 1));
+
+            const mixed = d2 * (1 - h) + -d1 * h;
+            return mixed + k * h * (1 - h);
+        }
+
+        opSmoothIntersection(d1, d2, k = 0.1) {
+            // float opSmoothIntersection( float d1, float d2, float k ) {
+            // float h = clamp( 0.5 - 0.5*(d2-d1)/k, 0.0, 1.0 );
+            // return mix( d2, d1, h ) + k*h*(1.0-h); }
+            const v = 0.5 - 0.5 * (d2 - d1) / k;
+            const h = Math.max(0, Math.min(v, 1));
+
+            const mixed = d2 * (1 - h) + d1 * h;
+            return mixed + k * h * (1 - h);
+        }
+
+        opTwist(p, k = 4.0) {
+            // Twist amount.
+            // NOTE:
+            // Number of cubes has to be kind of high to get a good look out of this.
+            const c = Math.cos(k * p[1]);
+            const s = Math.sin(k * p[1]);
+            const q = [
+                p[0] * c + p[2] * -s,
+                p[0] * s + p[2] * c,
+                p[1],
+            ];
+
+            return q;
+        }
+
+        opBend(p, k = 1.0) {
+            // float opCheapBend( in sdf3d primitive, in vec3 p )
+            // {
+            //     const float k = 10.0; // or some other amount
+            //     float c = cos(k*p.x);
+            //     float s = sin(k*p.x);
+            //     mat2  m = mat2(c,-s,s,c);
+            //     vec3  q = vec3(m*p.xy,p.z);
+            //     return primitive(q);
+            // }
+            const c = Math.cos(k * p[0]);
+            const s = Math.sin(k * p[0]);
+            const q = [
+                p[0] * c + p[1] * -s,
+                p[0] * s + p[1] * c,
+                p[2],
+            ];
+            return q;
+        }
+
+        opOnion(sdf, thickness) {
+            return Math.abs(sdf) - thickness;
+        }
+
+        opElongate(sdfFunction, p, h) {
+            // float opElongate( in sdf3d primitive, in vec3 p, in vec3 h )
+            // {
+            //     vec3 q = abs(p)-h;
+            //     return primitive( max(q,0.0) ) + min(max(q.x,max(q.y,q.z)),0.0);
+            // }
+            const qx = Math.abs(p[0]) - h[0];
+            const qy = Math.abs(p[1]) - h[1];
+            const qz = Math.abs(p[2]) - h[2];
+
+            const qMaxX = Math.max(qx, 0);
+            const qMaxY = Math.max(qy, 0);
+            const qMaxZ = Math.max(qz, 0);
+
+            const d = sdfFunction([qMaxX, qMaxY, qMaxZ]) + Math.min(Math.max(qx, Math.max(qy, qz)), 0);
+            return d;
+        }
+
+        sdfSphere(p, radius, c) {
+            const magnitude = Math.sqrt(
+                (p[0] - c[0]) ** 2 +
+                (p[1] - c[1]) ** 2 +
+                (p[2] - c[2]) ** 2
+            );
+            return magnitude - radius;
+        }
+
+        sdfTorus(p, r1, r2) {
+            const qx = Math.sqrt(p[0] ** 2 + p[2] ** 2) - r1;
+            const qy = p[1];
+            
+            return  Math.sqrt(qx ** 2 + qy ** 2) - r2;
+        }
+
+        sdfBox(p, dimension) {
+            const qx = Math.abs(p[0]) - dimension[0];
+            const qy = Math.abs(p[1]) - dimension[1];
+            const qz = Math.abs(p[2]) - dimension[2];
+
+            const qmx = Math.max(qx, 0.0);
+            const qmy = Math.max(qy, 0.0);
+            const qmz = Math.max(qz, 0.0);
+            return Math.sqrt(qmx ** 2 + qmy ** 2 + qmz ** 2) + Math.min(Math.max(qx,Math.max(qy,qz)),0.0);
+        }
+
+        sdfOctahedron(p, s) {
+            // float sdOctahedron( vec3 p, float s)
+            // {
+            // p = abs(p);
+            // float m = p.x+p.y+p.z-s;
+            // vec3 q;
+            //     if( 3.0*p.x < m ) q = p.xyz;
+            // else if( 3.0*p.y < m ) q = p.yzx;
+            // else if( 3.0*p.z < m ) q = p.zxy;
+            // else return m*0.57735027;
+                
+            // float k = clamp(0.5*(q.z-q.y+s),0.0,s); 
+            // return length(vec3(q.x,q.y-s+k,q.z-k)); 
+            // }
+
+            const px = Math.abs(p[0]);
+            const py = Math.abs(p[1]);
+            const pz = Math.abs(p[2]);
+            let qx;
+            let qy;
+            let qz;
+        
+            const m = px + py + pz - s;
+            if (3 * px < m) {
+                qx = px;
+                qy = py;
+                qz = pz;
+            } else if (3 * py < m) {
+                qx = py;
+                qy = pz;
+                qz = px;
+            } else if (3 * pz < m) {
+                qx = pz;
+                qy = px;
+                qz = py;
+            } else {
+                return m * 0.57735027;
+            }
+
+            const k = Math.max(0, Math.min(0.5 * (qz - qy + s), s));
+
+            return Math.sqrt(qx ** 2 + (qy - s + k) ** 2 + (qz - k) ** 2);
+        }
+
+        // 2D-Related
+
+        opRevolution(p, o) {
+        // opRevolution( in vec3 p, in sdf2d primitive, float o )
+            // vec2 q = vec2( length(p.xz) - o, p.y );
+            // For a 2D sdf.
+            return [Math.sqrt(p[0] ** 2 + p[2] ** 2) - o, p[1]];
+        }
+        
+        sdfCircle(p, r) {
+            return Math.sqrt(p[0] ** 2 + p[1] ** 2) - r;
+        }
+    }
+
+    class Shader {
+        constructor(gl, vertCode, fragCode) {
+            this.program = null;
+            this.setupShader(gl, vertCode, fragCode);
+        }
+
+        setupShader(gl, vertCode, fragCode) {
+            const log = (shader) => {
+                const compiled = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+                if (!compiled) {
+                    console.log('Shader compiled failed: ' + compiled);
+                
+                    const compilationLog = gl.getShaderInfoLog(shader);
+                    console.log('Shader compiler log: ' + compilationLog);
+                }
+            };
+
+            const vertShader = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vertShader, vertCode);
+            gl.compileShader(vertShader);
+            log(vertShader);
+            
+        
+            const fragShader = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fragShader, fragCode); 
+            gl.compileShader(fragShader);
+            log(fragShader);
+            
+            const shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vertShader);
+            gl.attachShader(shaderProgram, fragShader);
+            gl.linkProgram(shaderProgram);
+
+            this.program = shaderProgram
+        }
+
+        cacheUniformLocations(gl, uniformNames) {
+            uniformNames.forEach(name => {
+                const key = `${name}Location`;
+                this[key] = gl.getUniformLocation(this.program, name);
+            });
+        }
+
+        cacheAttributeLocations(gl, attributeNames) {
+            attributeNames.forEach(name => {
+                const key = `${name}Location`;
+                const location = gl.getAttribLocation(this.program, name);
+                this[key] = location;
+            });
+        }
+    }
+
+    class MarchingCubes {
+        constructor(sdf, viz) {
+            this.sdf = sdf;
+            this.viz = viz;
+            this.size = 2;
+            this.cubeSize = 0.2;
+            this.toggleInterpolate = true;
+            this.togglePerVertexNormals = true;
+            this.toggleMarchingCubesDebug = false;
+
+            const stateDefaults = {
+                buffer: null,
+                data: null,
+                callback: null,
+                enabled: true,
+                hasNormals: false,
+                debugNormals: false,
+                useTexture: -1,
+            };
+
+            this.state = {
+                grid: {
+                    ...stateDefaults,
+                    colour: new Float32Array([1.0, 1.0, 1.0]),
+                    opacity: 0.2,
+                },
+                boundingBox: {
+                    ...stateDefaults,
+                    colour: new Float32Array([1.0, 1.0, 1.0]),
+                    opacity: 1,
+                },
+                mesh: {
+                    ...stateDefaults,
+                    colour: new Float32Array([0.9, 0.94, 1.0]),
+                    opacity: 1,
+                    hasNormals: true,
+                    debugNormals: true,
+                    useTexture: 0,
+                },
+            };
+        }
+
+
+        nextSdf = () => {
+            this.sdf.state.sdfLibraryIndex++;
+            if (this.sdf.state.sdfLibraryIndex >= this.sdf.sdfLibrary.length) {
+                this.sdf.state.sdfLibraryIndex = 0;
+            }
+            this.sdf.currentSdf = this.sdf.sdfLibrary[this.sdf.state.sdfLibraryIndex];
+            this.march();
+        }
+
+        updateGrid() {
+            if (!this.state.grid.enabled) {
+                return;
+            }
+            const start = -this.size * 0.5;
+            const end = this.size * 0.5;
+            const { cubeSize: s } = this;
+
+            // Draw a 3d grid, rather than trying to wireframe the cubes.
+            const lines = [];
+            // lines left to right
+            for (let y = start; y <= end; y += s) {
+                for (let z = start; z <= end; z += s) {
+                    lines.push(start, y, z);
+                    lines.push(end, y, z);
+                }
+            }
+
+            // lines bottom to top
+            for (let x = start; x <= end; x += s) {
+                for (let z = start; z <= end; z += s) {
+                    lines.push(x, start, z);
+                    lines.push(x, end, z);
+                }
+            }
+            // lines back to front.
+            for (let x = start; x <= end; x += s) {
+                for (let y = start; y <= end; y += s) {
+                    lines.push(x, y, start);
+                    lines.push(x, y, end);
+                }
+            }
+
+            this.state.grid.data = new Float32Array(lines);
+            this.state.grid.callback = (gl) => gl.drawArrays(gl.LINES, 0, lines.length / 3);
+            viz.setupBuffer(this.state.grid);
+        }
+
+        updateBoundingBox() {
+            if (!this.state.boundingBox.enabled) {
+                return;
+            }
+            const start = -this.size * 0.5;
+            const end = this.size * 0.5;
+            const { cubeSize: s } = this;
+
+            // Draw a bounding box around the march area for debug/viz.
+            const lines = [];
+
+            // lines left to right
+            lines.push(start, start, start);
+            lines.push(end, start, start);
+            lines.push(start, end, start);
+            lines.push(end, end, start);
+            lines.push(start, start, end);
+            lines.push(end, start, end);
+            lines.push(start, end, end);
+            lines.push(end, end, end);
+
+            // // lines bottom to top
+            lines.push(start, start, start);
+            lines.push(start, end, start);
+            lines.push(end, start, start);
+            lines.push(end, end, start);
+            lines.push(start, start, end);
+            lines.push(start, end, end);
+            lines.push(end, start, end);
+            lines.push(end, end, end);
+
+            // lines back to front.
+            lines.push(start, start, start);
+            lines.push(start, start, end);
+            lines.push(end, start, start);
+            lines.push(end, start, end);
+            lines.push(start, end, start);
+            lines.push(start, end, end);
+            lines.push(end, end, start);
+            lines.push(end, end, end);
+
+            this.state.boundingBox.data = new Float32Array(lines);
+            this.state.boundingBox.callback = (gl) => gl.drawArrays(gl.LINES, 0, lines.length / 3);
+            viz.setupBuffer(this.state.boundingBox);            
+        }
+
+        getVertexMidpoint(p1, p2) {
+            // Midpoint interpolation for finding a vertex along a marching cube edge between two points.
+            const p = new Float32Array(3);
+            p[0] = (p1[0] + p2[0]) * 0.5;
+            p[1] = (p1[1] + p2[1]) * 0.5;
+            p[2] = (p1[2] + p2[2]) * 0.5;
+            return p;
+        }
+
+        getVertexInterpolated(p1, p2, valp1, valp2) {
+            // http://paulbourke.net/geometry/polygonise/
+            // Some random value we pick afaict. But since we use an isolevel
+            // of 0 to determine inside or outside (i.e. any value < 0 is inside)
+            // we should be able to just set this to 0 and leave it at that.
+            const isolevel = 0.0;
+            // const epsilon = 0.00001;
+            const epsilon = 0;
+            const p = new Array(3);
+
+            if (Math.abs(isolevel - valp1) < epsilon) {
+                return p1;
+            }
+            if (Math.abs(isolevel - valp2) < epsilon) {
+                return p2;
+            }
+            if (Math.abs(valp1 - valp2) < epsilon) {
+                return p1;
+            }
+
+            const mu = (isolevel - valp1) / (valp2 - valp1);
+            p[0] = p1[0] + mu * (p2[0] - p1[0]);
+            p[1] = p1[1] + mu * (p2[1] - p1[1]);
+            p[2] = p1[2] + mu * (p2[2] - p1[2]);
+
+            return p;
+        }
+
+        toTriangles(edgeTableIndex, corners, sdfValues) {
+            
+            if (EDGE_TABLE[edgeTableIndex] == 0) {
+                // Cube is entirely inside / outside of the surface
+                return [];
+            }
+
+            const vertList = new Array(12);
+
+            EDGE_TABLE_TO_VERT_LIST.forEach(({ mask, startIdx, endIdx }, i) => {
+                if (EDGE_TABLE[edgeTableIndex] & mask) {
+                    // Find the vertices where the surface intersects the cube
+                    // This must be between the corners[startIdx] and corners[endIdx] (i.e. it's
+                    // some percentage along this line).
+                    // Another thing that must be true is that if the sdfValues[startIdx] is > 0
+                    // then sdfValues[endIdx] is < 0 or vice versa to show we're crossing the surface.
+                    if (this.toggleInterpolate) {
+                        vertList[i] = this.getVertexInterpolated(corners[startIdx], corners[endIdx], sdfValues[startIdx], sdfValues[endIdx]);
+                    } else {
+                        vertList[i] = this.getVertexMidpoint(corners[startIdx], corners[endIdx]);
+                    }
+                }
+            });
+
+            // Create all the triangles that we'd get from the resulting mask.
+            const triangles = [];
+
+            // Look up triangles in the TRI_TABLE until we encounter a -1 for the current index.
+            // If we hit -1 it means that no further vertices are defined for the tri.
+            for (let i = 0; TRI_TABLE[edgeTableIndex][i] != -1; i += 3) {
+                const triangle = [
+                    // The TRI_TABLE will give us an edgeTableIndex into the verlist.
+                    // e.g. if the edgeTableIndex is 64 (0x40), then we get the following triangle indices:
+                    // [10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+                    // This means we now use 10, 6, and 5 as look ups into the vertList.
+                    // In turn, the vertList can have missing entires for all the other values, as
+                    // long as there is something at 10, 6, and 5.
+                    vertList[TRI_TABLE[edgeTableIndex][i]],
+                    vertList[TRI_TABLE[edgeTableIndex][i + 1]],
+                    vertList[TRI_TABLE[edgeTableIndex][i + 2]],
+                ];
+                triangles.push(triangle);
+            }
+            return triangles;
+        }
+
+        getFaceNormal(tri) {
+            // compute normal with cross product between the vectors made by the vertices
+            // tri[0] tri[1] and tri[0] tri[2].
+            const ax = tri[1][0] - tri[0][0];
+            const ay = tri[1][1] - tri[0][1];
+            const az = tri[1][2] - tri[0][2];
+
+            const bx = tri[2][0] - tri[0][0];
+            const by = tri[2][1] - tri[0][1];
+            const bz = tri[2][2] - tri[0][2];
+
+            // We get lucky in that winding in this direction seems to guarantee, always,
+            // an outward orientation for the normal.
+            const nx = ay * bz - az * by;
+            const ny = -(ax * bz - az * bx);
+            const nz = ax * by - ay * bx;
+            return [nx, ny, nz];
+        }
+
+        getPerVertexNormal(v) {
+            const { currentSdf } = this.sdf;
+            /*
+             * Basically gives us the per-vertex normal. If we don't use this approach, we'll have to
+             * later on:
+             * 1. for each vertex
+             * 2. figure out which triangles touch it.
+             * 3. take the normal of each triangle
+             * 4. add them all together to average each triangles contribution
+             * 5. make that normal the per-vertex normal
+             * Based on how we generate the mesh, finding the triangles that a vertex shares is
+             * cumbersome, but it might be worthwhile doing later on to cut down on geometry and use
+             * indexing + drawElements.
+             * See the comments at the very top for more info and links on per-vertex normals.
+             */
+
+            // https://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
+            // vec3 calcNormal( in vec3 p ) // for function f(p)
+            // {
+            //     const float eps = 0.0001; // or some other value
+            //     const vec2 h = vec2(eps,0);
+            //     return normalize( vec3(f(p+h.xyy) - f(p-h.xyy),
+            //                         f(p+h.yxy) - f(p-h.yxy),
+            //                         f(p+h.yyx) - f(p-h.yyx) ) );
+            // }
+            const eps = 0.00001;
+            const x = currentSdf([v[0] + eps, v[1], v[2]]) - currentSdf([v[0] - eps, v[1], v[2]]);
+            const y = currentSdf([v[0], v[1] + eps, v[2]]) - currentSdf([v[0], v[1] - eps, v[2]]);
+            const z = currentSdf([v[0], v[1], v[2] + eps]) - currentSdf([v[0], v[1], v[2] - eps]);
+
+            return [x, y, z];
+        }
+
+        unindexedData(triangles) {
+            // 3 vertices per triangle, 3 normals coordinates and 3 vertex coordinates per vertex.
+            const verticesNormals = new Float32Array(triangles.length * 3 * (3 + 3));
+
+            let index = 0;
+            for (let i = 0; i < triangles.length; i++) {
+                const tri = triangles[i];
+                for (let j = 0; j < tri.length; j++) {
+                    const vert = tri[j];
+                    // Using the per-face normal causes faceting, because each vertex in the triangle shares the
+                    // same normal as the entire triangle. That means instead of averaging the normals
+                    // across multiple triangles, we're inadvertently sharing the the single normal
+                    // of the triangle face across each vertex of the triangle. This means lighting
+                    // for each point is intead using lighting for the entire triangular surface,
+                    // causing faceting.
+                    // Using the SDF with `getPerVertexNormal`, on the other hand, doesn't.
+                    const normal = this.togglePerVertexNormals ? this.getPerVertexNormal(vert) : this.getFaceNormal(tri);
+                    verticesNormals[index] = vert[0];
+                    verticesNormals[index + 1] = vert[1];
+                    verticesNormals[index + 2] = vert[2];
+                    verticesNormals[index + 3] = normal[0];
+                    verticesNormals[index + 4] = normal[1];
+                    verticesNormals[index + 5] = normal[2];
+                    index += 6;
+                }
+            }
+            return verticesNormals;
+        }
+
+        handleCorner(x, y, z, s, triangles) {
+            // When we march, we need a way to do know if a cube's point is inside the surface
+            // or not. We'll use an SDF for that (where - is inside, + is outside, 0 is on the
+            // edge). The SDF's interface should support a 3-value vector, and output true/false
+            // (i guess, we can treat on the surface as 'inside').
+            // To keep it generic, this is given programmatically.
+            // The x, y, z parameters here represent the top, left, back corner of the current cube.
+            // We compute the other corners on the fly here.
+            // The s parameter is the cube size.
+            // The triangles parameter is where we output triangles from the marching algorithm.
+
+            // Since we're working out way up from negative to positive, we are slowly moving
+            // from a bottom, left, back corner to a top, right, front corner.
+            // We have 8 corners to test, we'll label them as such.
+            const corners = [
+                // bottom back left
+                [x, y, z],
+                // bottom back right
+                [x + s, y, z],
+                // bottom front right
+                [x + s, y, z + s],
+                // bottom front left
+                [x, y, z + s],
+                // top back left
+                [x, y + s, z],
+                // top back right
+                [x + s, y + s, z],
+                // top front right
+                [x + s, y + s, z + s],
+                // top front left
+                [x, y + s, z + s],
+            ];
+
+            const { currentSdf } = this.sdf;
+            const sdfValues = new Float32Array(8);
+            let edgeTableIndex = 0;
+
+            for (let i = 0; i < corners.length; i++) {
+                const corner = corners[i];
+                const sdfValue = currentSdf(corner);
+                sdfValues[i] = sdfValue;
+
+                // Avoid things on the edge, since it will cause interpolation issues afaict.
+                const inside = sdfValue < 0;
+                if (!inside) {
+                    continue;
+                }
+
+                // Relies on the corners being ordered according to the convention of bottom face,
+                // clockwise from back left, then top face, same orientation.
+                const mask = 2 ** i;
+                edgeTableIndex |= mask;
+            }
+
+            if (edgeTableIndex) {
+                triangles.push(...this.toTriangles(edgeTableIndex, corners, sdfValues));
+            }
+        }
+
+        marchCubes() {
+            const { size, cubeSize: s } = this;
+            const start = -size * 0.5;
+            const end = size * 0.5;
+            const triangles = [];
+
+            // Make the cubes.
+            for (let x = start; x < end; x += s) {
+                for (let y = start; y < end; y += s) {
+                    for (let z = start; z < end; z += s) {
+                        this.handleCorner(x, y, z, s, triangles);
+                    }
+                }
+            }
+
+            this.state.mesh.data = this.unindexedData(triangles);
+            this.state.mesh.callback = (gl) => gl.drawArrays(gl.TRIANGLES, 0, this.state.mesh.data.length / 6);
+            viz.setupBuffer(this.state.mesh);
+        }
+
+        march = () => {
+            this.marchCubes();
+            this.updateGrid();
+            this.updateBoundingBox();
+            this.handleCorner();
+        }
+    }
+
+    class Viz {
+        constructor() {
+            this.canvas = document.getElementById('canvas');
+            this.ctx = this.canvas.getContext('webgl2', {
+                alpha: true,
+                antialias: true,
+                depth: true,
+                premultipliedAlpha: false,
+            });
+            this.state = {};
+            this.cameraPosition = {
+                x: 0,
+                y: 0,
+                z: 4,
+            };
+
+            this.toggleUseTexture = false;
+
+            this.setupMatrices();
+            this.setupTexture();
+            this.setupGL();
+        }
+
+        setupMatrices = () => {
+            const { mat4, vec3 } = glMatrix;
+            this.modelMatrix = mat4.create();
+
+            this.viewMatrix = mat4.create();
+            // viewer centre, view direction, up
+            const { x, y, z } = this.cameraPosition;
+            mat4.lookAt(this.viewMatrix, vec3.fromValues(x, y, z), vec3.fromValues(0, 0, -1), vec3.fromValues(0, 1, 0));
+
+            this.projectionMatrix = mat4.create();
+            mat4.perspective(this.projectionMatrix, Math.PI / 3, 1, 1 / 1024, 1024);
+        }
+
+        setupTexture() {
+            const { ctx: gl } = this;
+            const img = new Image();
+            // TODO
+            // Add an src here to bind and use this texture.
+            // img.src = base64 data or something else.
+            img.onload = () => {
+                this.texture = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, this.texture);
+                gl.texImage2D(
+                    gl.TEXTURE_2D,
+                    0,
+                    gl.RGBA,
+                    img.width,
+                    img.height,
+                    0,
+                    gl.RGBA,
+                    gl.UNSIGNED_BYTE,
+                    img,
+                );
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            }
+        }
+
+        setupGL() {
+            const { ctx: gl } = this;
+
+            gl.enable(gl.BLEND);
+            // Needed for alpha and depth testing.
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.LEQUAL);
+            gl.depthRange(1 / 1024, 1024);
+
+            gl.depthMask(true);
+
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+            this.setupShaders();
+        }
+
+        setupShaders() {
+            const { ctx: gl } = this;
+
+            const uniforms = [
+                'u_model_matrix',
+                'u_view_matrix',
+                'u_projection_matrix',
+                'u_colour',
+                'u_opacity',
+                'u_time',
+                'u_has_normals',
+                'u_debug_normals',
+                'u_use_texture',
+                'u_texture',
+            ];
+
+            const attributes = [
+                'a_position',
+                'a_normal',
+            ];
+
+            // Phong Vertex
+            // Version must be on the first line.
+            const vertCode = `#version 300 es
+                precision highp float;
+                uniform mat4 u_model_matrix;
+                uniform mat4 u_view_matrix;
+                uniform mat4 u_projection_matrix;
+                uniform float u_time;
+
+                in vec3 a_position;
+                in vec3 a_normal;
+
+                out vec3 v_position;
+                out vec3 v_world_position;
+                out vec3 v_normal;
+                out vec3 v_world_normal;
+                out vec3 v_colour;
+                out vec3 v_camera_position;
+
+                void main(void) {
+                    // This but for R4:
+                    // https://en.wikipedia.org/wiki/Rotation_matrix#Basic_rotations
+                    mat4 rotationX = mat4(1.);
+                    rotationX[1][1] = cos(u_time);
+                    rotationX[1][2] = sin(u_time);
+                    rotationX[2][1] = -sin(u_time);
+                    rotationX[2][2] = cos(u_time);
+
+                    mat4 rotationY = mat4(1.);
+                    rotationY[0][0] = cos(u_time);
+                    rotationY[0][2] = sin(u_time);
+                    rotationY[2][0] = -sin(u_time);
+                    rotationY[2][2] = cos(u_time);
+
+                    mat4 rotationZ = mat4(1.);
+                    rotationZ[0][0] = cos(u_time);
+                    rotationZ[0][1] = sin(u_time);
+                    rotationZ[1][0] = -sin(u_time);
+                    rotationZ[1][1] = cos(u_time);
+
+                    mat4 rotation = rotationZ * rotationY * rotationX;
+                    // rotation = mat4(1.);
+
+                    gl_Position = u_projection_matrix * u_view_matrix * u_model_matrix * rotation * vec4(a_position, 1.);
+
+                    // Need to apply these transformations for the per-fragment lighting to work.
+                    // Specifically for Phong, we need to do things in the eye-space (i.e. view * model)
+                    // https://www.lighthouse3d.com/tutorials/glsl-12-tutorial/the-normal-matrix/
+                    v_position = (u_view_matrix * u_model_matrix * rotation * vec4(a_position, 1.)).xyz;
+                    v_world_position = (u_model_matrix * vec4(a_position, 1.)).xyz;
+                    v_normal = (u_view_matrix * u_model_matrix * rotation * vec4(a_normal, 0.)).xyz;
+                    v_world_normal = (u_model_matrix * vec4(a_normal, 0.)).xyz;
+                    // If we want to use the normal as a colour (for debugging), it has to have
+                    // only positive values and it must be normalized for [0, 1] ranges.
+                    v_colour = abs(normalize(a_normal));
+                    // The camera's position is just a translation in the viewMatrix, so we can pick it off the bottom
+                    // row since it's column major. Since we're moving everything away from the camera, we need to
+                    // negate it too.
+                    v_camera_position = (u_view_matrix * -(u_view_matrix[3])).xyz;
+                }
+            `
+
+            // Phong Fragment
+            // Version must be on the first line.
+            const fragCode = `#version 300 es
+                precision highp float;
+                uniform vec3 u_colour;
+                uniform float u_opacity;
+                uniform float u_time;
+                uniform bool u_has_normals;
+                uniform bool u_debug_normals;
+                uniform int u_use_texture;
+                uniform sampler2D u_texture;
+
+                in vec3 v_position;
+                in vec3 v_world_position;
+                in vec3 v_normal;
+                in vec3 v_world_normal;
+                in vec3 v_colour;
+                in vec3 v_camera_position;
+
+                out vec4 colour;
+
+                struct Light {
+                    vec3 position;
+                    float intensity;
+                };
+
+                Light LIGHTS[] = Light[](
+                    // top left
+                    Light(vec3(-1., 5., 0.), 0.85),
+                    // bottom right back
+                    Light(vec3(2., -2., 2.), 0.1)
+                    // front right or left
+                    // Light(vec3(-2., 0., 6), 0.1)
+                );
+
+                vec3 polka_dots(vec2 point) {
+                    // mx and my are now some value between 0 and size.
+                    float size = 0.2;
+                    float half_size = size * 0.5;
+                    vec2 modPoint = mod(point, size);
+
+                    // Shift to centre of the quadrant, since it's been divided into 4
+                    vec2 centre = vec2(half_size);
+                    float d = distance(centre, modPoint);
+
+                    // controls how big the circles will be
+                    float radius = half_size * 0.5;
+                    if (radius < d) {
+                        return vec3(1.);
+                    }
+
+                    // Smoothes the intersection between the polkadot and the returned background
+                    // because we slowly blendly between white and red as we apporach the radius
+                    // boundary.
+                    float stepped = 1. - smoothstep(0.2, 0.3, abs(radius - d) / radius);
+                    return vec3(1., stepped, stepped);
+                }
+
+                vec3 striped_polka_dots(vec2 point) {
+                    // mx and my are now some value between 0 and size.
+                    float size = 0.2;
+                    float half_size = size * 0.5;
+                    vec2 modPoint = mod(point, size);
+
+                    // Shift to centre of the quadrant, since it's been divided into 4
+                    vec2 centre = vec2(half_size);
+                    float d = distance(centre, modPoint);
+
+                    // controls how big the circles will be
+                    float radius = half_size * 0.5;
+
+                    // controls the stripe staggering.
+                    // we take double the size because the circle occupies this entire row.
+                    // if we're above half the doubled size, we're technically on another row.
+                    float colour = mod(point.y, size * 2.0) > size ? 1. : 0.;
+
+                    if (radius < d) {
+                        return vec3(1. - colour);
+                    }
+                    return vec3(colour);
+                }
+
+                vec3 checkerboard(vec2 point) {
+                    // mx and my are now some value between 0 and size.
+                    float size = 0.2;
+                    float half_size = size * 0.5;
+                    float mx = mod(point.x, size);
+                    float my = mod(point.y, size);
+
+                    // tracking even/odd rows lets us stagger the colour like a proper checkerboard
+                    // without doing this, we get stripes.
+                    // even rows
+                    // if it's > half_size, choose an even row, otherwise use an odd row.
+                    float colour = my > half_size ? 1. : 0.;
+
+                    if (mx > half_size) {
+                        return vec3(1. - colour);
+                    }
+                    return vec3(colour);
+                }
+
+                vec3 stripes(vec2 point, int direction) {
+                    // 0 for horizontal, 1 for vertical.
+                    // mx and my are now some value between 0 and size.
+                    float size = 0.05;
+                    float half_size = size * 0.5;
+                    float mx = mod(point.x, size);
+                    float my = mod(point.y, size);
+
+                    // tracking even/odd rows lets us stagger the colour like a proper checkerboard
+                    // without doing this, we get stripes.
+                    // even rows
+                    // if it's > half_size, choose an even row, otherwise use an odd row.
+
+                    if ((mx > half_size && direction == 0) ||  (my > half_size && direction == 1)) {
+                        return vec3(1.);
+                    }
+
+                    return vec3(0.);
+                }
+
+                // https://iquilezles.org/www/articles/biplanar/biplanar.htm
+                // "p" point being textured
+                // "n" surface normal at "p"
+                // "k" controls the sharpness of the blending in the transitions areas
+                // "s" texture sampler
+                // vec4 boxmap( in sampler2D s, in vec3 p, in vec3 n, in float k )
+                vec4 boxmap(in vec3 p, in vec3 n, in float k )
+                {
+                    // Just scale the point up if we want more repetition from the texture.
+                    p *= 1.5;
+                    // vec4 x = texture(u_texture, p.yz);
+                    // vec4 y = texture(u_texture, p.zx);
+                    // vec4 z = texture(u_texture, p.xy);
+                    vec4 x = vec4(0.);
+                    vec4 y = vec4(0.);
+                    vec4 z = vec4(0.);
+
+                    switch (u_use_texture) {
+                        case ${TEXTURE_POLKA_DOT}:
+                            x = vec4(polka_dots(p.yz), 1.);
+                            y = vec4(polka_dots(p.zx), 1.);
+                            z = vec4(polka_dots(p.xy), 1.);
+                            break;
+                        case ${TEXTURE_CHECKERBOARD}:
+                            x = vec4(checkerboard(p.yz), 1.);
+                            y = vec4(checkerboard(p.zx), 1.);
+                            z = vec4(checkerboard(p.xy), 1.);
+                            break;
+                    }
+
+                    // blend factors
+                    vec3 w = pow( abs(n), vec3(k) );
+                    // blend and return
+                    return (x*w.x + y*w.y + z*w.z) / (w.x + w.y + w.z);
+                }
+
+                float falloff(void) {
+                    float max_distance = 1.5;
+                    float d = distance(vec3(0.), v_world_position);
+                    float falloff = 1. - d / max_distance;
+                    return falloff;
+                }
+
+                vec3 lighting(vec3 base_colour) {
+                    vec3 colour = vec3(0.);
+
+                    // Always work in unit vector space for this kind of stuff.
+                    vec3 normal = normalize(v_normal);
+                    // A way to calculate per-face normals if needed.
+                    // vec3 normal = normalize(cross(dFdx(v_position), dFdy(v_position)));
+
+                    for (int i = 0; i < LIGHTS.length(); i++) {
+                        Light light = LIGHTS[i];
+                        vec3 light_to_vertex = normalize(light.position - v_position);
+                        
+                        // https://www.cs.toronto.edu/~jacobson/phong-demo/
+                        // Lambert's cosine law
+                        float lambertian = max(dot(normal, light_to_vertex), 0.0);
+                        float specular = 0.0;
+                        float shininess_value = 512.;
+                        if (lambertian > 0.0) {
+                            // Reflected light vector
+                            vec3 reflection = reflect(-light_to_vertex, normal);
+                            // Vector to viewer
+                            vec3 vector_to_camera = normalize(v_camera_position - v_position);
+                            // Compute the specular term
+                            float specular_angle = max(dot(reflection, vector_to_camera), 0.0);
+                            specular = pow(specular_angle, shininess_value);
+                        }
+
+                        float Kd = light.intensity;
+                        float Ka = 0.05;
+                        float Ks = light.intensity;
+
+                        // Use this to 'scroll' the texture over the shape, since it will keep
+                        // using rotated values to sample from the boxmap.
+                        // vec3 working_colour = boxmap(v_position, v_normal, 5.).xyz;
+                        vec3 working_colour = base_colour;
+                        if (u_use_texture >= 0) {
+                            // Overrides normal debug colour.
+                            working_colour = boxmap(v_world_position, v_world_normal, 5.).xyz;
+                        }
+                        vec3 ambient_colour = working_colour.xyz;
+                        vec3 specular_colour = working_colour;
+
+                        colour += vec3(
+                            Ka * ambient_colour +
+                            Kd * lambertian * working_colour +
+                            Ks * specular * specular_colour
+                        );
+                    }
+
+                    return colour;
+                }
+
+                void main(void) {
+                    colour = vec4(u_colour, u_opacity);
+
+                    if (u_debug_normals) {
+                        colour.xyz = v_colour;
+                    }
+
+                    if (u_has_normals) {
+                        colour.xyz = lighting(colour.xyz);
+                    }
+
+                    // colour.xyz = vec3(falloff());
+                }
+            `
+
+            this.state[SHADER_NAME] = new Shader(gl, vertCode, fragCode);
+            this.state[SHADER_NAME].cacheUniformLocations(gl, uniforms);
+            this.state[SHADER_NAME].cacheAttributeLocations(gl, attributes);
+
+            // We reuse the same shader over and over, so we an make this the program we use right here.
+            // If we need to switch shaders between draw calls, we'll then have to move this to draw()
+            const { [SHADER_NAME]: shader } = this.state;
+            const { program } = shader;           
+
+            gl.useProgram(program);
+        }
+
+        setupBuffer(obj) {
+            const { ctx: gl } = this;
+            if (obj.buffer) {
+                gl.deleteBuffer(obj.buffer);
+            }
+
+            const buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ARRAY_BUFFER, obj.data, gl.STATIC_DRAW);
+            obj.buffer = buffer;
+        }
+
+        clear() {
+            const { ctx: gl } = this;
+
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        }
+
+        draw(obj, timestamp = 0) {
+            const { ctx: gl } = this;
+            const { buffer, callback, opacity, colour, hasNormals, debugNormals, enabled, useTexture, } = obj;
+            const { [SHADER_NAME]: shader } = this.state;
+            const { program } = shader;
+            if (!enabled) {
+                return;
+            }
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+
+            if (obj.hasNormals) {
+                // 24 bytes of data (3 * 4 for positions + 3 * 4 for normals)
+                gl.vertexAttribPointer(shader.a_positionLocation, 3, gl.FLOAT, false, 24, 0);
+                gl.enableVertexAttribArray(shader.a_positionLocation);
+                // 12 bytes after the positions come the normals
+                gl.vertexAttribPointer(shader.a_normalLocation, 3, gl.FLOAT, false, 24, 12);
+                gl.enableVertexAttribArray(shader.a_normalLocation);
+            } else {
+                gl.vertexAttribPointer(shader.a_positionLocation, 3, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(shader.a_positionLocation);
+            }
+
+            // TODO
+            // Use a UBO.
+            gl.uniform1f(shader.u_timeLocation, timestamp);
+
+            gl.uniform3fv(shader.u_colourLocation, colour);
+            gl.uniform1f(shader.u_opacityLocation, opacity);
+            gl.uniform1i(shader.u_has_normalsLocation, hasNormals);
+            gl.uniform1i(shader.u_debug_normalsLocation, debugNormals);
+            gl.uniform1i(shader.u_use_textureLocation, useTexture);
+
+            gl.uniformMatrix4fv(shader.u_model_matrixLocation, false, this.modelMatrix);
+            gl.uniformMatrix4fv(shader.u_view_matrixLocation, false, this.viewMatrix);
+            gl.uniformMatrix4fv(shader.u_projection_matrixLocation, false, this.projectionMatrix);
+
+            if (this.texture) {
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, this.texture);
+                // Tell the shader we bound the texture to texture unit 0
+                gl.uniform1i(shader.u_textureLocation, 0);
+            }
+
+            // Responsible for the actual draw calls.
+            callback(gl);
+
+            // Need to disable if it was previously enabled for the normal draw
+            gl.disableVertexAttribArray(shader.a_positionLocation);
+            gl.disableVertexAttribArray(shader.a_normalLocation)
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        }
+    }
+
+    function setupControls(viz, mc, animate) {
+        const gui = new dat.GUI();
+        gui.width = gui.width * 1.5;
+
+        const folderMarching = gui.addFolder('Marching Cubes');
+        folderMarching.open();
+        folderMarching.add(mc, 'size', 1, 100, 1).name('Box Size');
+        folderMarching.add(mc, 'cubeSize', 0.015, 2, 0.005).name('Cube Size');
+        folderMarching.add(mc, 'toggleInterpolate').name('Interpolate');
+        folderMarching.add(mc, 'togglePerVertexNormals').name('Per-Vertex Normals');
+
+        const folderViz = gui.addFolder('Visualization');
+        folderViz.open();
+        {
+            const max = 100;
+            const min = -max;
+
+            const props = ['x', 'y', 'z'];
+            props.forEach(p => {
+                const ctl = folderViz.add(viz.cameraPosition, p, min, max, 0.1);
+                ctl.name(`Camera ${p}`);
+                ctl.onChange(viz.setupMatrices);
+            });
+        }
+        folderViz.add(
+            mc.state.mesh,
+            'useTexture',
+            TEXTURE_OPTIONS.reduce((acc, o) => ({ ...acc, [o.name]: o.enum }), {}
+        )).name('Use Texture');
+
+        const folderDebug = gui.addFolder('Debug');
+        folderDebug.open();
+        folderDebug.add(mc, 'toggleMarchingCubesDebug').name('Show Cubes');
+        folderDebug.add(mc.state.mesh, 'debugNormals').name('Normal Colour');
+
+        // Just need a button to trigger marching again after changing params.
+        gui.add(mc, "march").name('March');
+        gui.add(animate, "startAnimation").name('Start Animation');
+        gui.add(mc, "nextSdf").name('Next Shape');
+    }
+
+    const { width, height } = document.getElementById('canvas');
+
+    const sdf = new SDF();
+    const viz = new Viz();
+    const mc = new MarchingCubes(sdf, viz);
+    const animate = new Animate(sdf, mc, viz);
+
+    setupControls(viz, mc, animate);
+
+    if (!animate.toggleAnimate) {
+        // Initial march until we recompute things based on controls interaction or animation.
+        mc.march();
+    }
+
+    const update = (timestamp) => {
+        if (animate.toggleAnimate) {
+            animate.updateAnimationState(timestamp);
+        }
+
+        const time = timestamp * 0.0003;
+        viz.clear();
+
+        if (mc.toggleMarchingCubesDebug) {
+            viz.draw(mc.state.grid, time);
+        } else {
+            viz.draw(mc.state.boundingBox, time);
+        }
+
+        viz.draw(mc.state.mesh, time);
+        window.requestAnimationFrame(update);
+    }
+
+    window.requestAnimationFrame(update);
+
+    </script>
+</html>
